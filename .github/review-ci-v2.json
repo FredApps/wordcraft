@@ -1,0 +1,17 @@
+{
+  "base": "6e0f7e79edabf5904ecb73104e809e6f053d9d27",
+  "head": "859c2a7fc051e4bd4713ac7a3a9574d53477b938",
+  "platforms": [],
+  "policy": "review-ci-v2.2-no-sonar",
+  "pr": 2443,
+  "repository": "storytold/wordcraft",
+  "source_tree": "754c6dc3456f49ee51443da61aa721105a10acfe",
+  "workflows": {
+    ".github/workflows/ci.yml": "880e2815e92516d304d7f2e2286b9e89937e37d4e657a66ce8de9ef992410206",
+    ".github/workflows/freebsd.yml": "b858e4dcefc390c9a566a0e9a3409b23e43bfaededae043babbac81e305a7fa3",
+    ".github/workflows/nix.yml": "9e25722cb5842163852885fd5d5573e9a94faa0fccea68948c1ef50bb9b98078",
+    ".github/workflows/packaging-lint.yml": "2c48611878804b43968904f0d5240850fae00bfae5c59fbb1efc08d3cfd1eecb",
+    ".github/workflows/printing.yml": "25199fe3243091f144bcb9a38fbeffbc077832a5f130c66f36fff0eaa2ff9c75",
+    ".github/workflows/windows-arm64.yml": "f25b6a498ce08ad22c1c8a7e0b60197a5f828fa9c7d3bc4bfbae44e9aa082622"
+  }
+}
