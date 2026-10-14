@@ -250,6 +250,7 @@ pub enum Dialog {
     Link {
         url: String,
         text: String,
+        focus: bool,
     },
     Bookmark {
         name: String,
@@ -1082,7 +1083,7 @@ impl Dialog {
                     rtl: sp.rtl,
                 }
             }
-            "link" => Dialog::Link { url: "https://".into(), text: app.session.selected_text() },
+            "link" => Dialog::Link { url: "https://".into(), text: app.session.selected_text(), focus: true },
             "bookmark" => Dialog::Bookmark { name: String::new() },
             "wordCount" => Dialog::WordCount { stats: app.session.run("review.wordCount", &json!({})).unwrap_or_default() },
             "zoom" => Dialog::Zoom { percent: (app.session.view.zoom * 100.0).round() },
@@ -1927,13 +1928,19 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             }
             ok || cancel
         }
-        Dialog::Link { url, text } => {
+        Dialog::Link { url, text, focus } => {
             egui::Grid::new("lnk").num_columns(2).show(ui, |ui| {
                 ui.label(tl!("Text to display:"));
                 ui.text_edit_singleline(text);
                 ui.end_row();
                 ui.label(tl!("Address:"));
-                ui.text_edit_singleline(url);
+                let mut out = egui::TextEdit::singleline(url).id(egui::Id::new("link_address")).show(ui);
+                if std::mem::take(focus) {
+                    out.response.request_focus();
+                    let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(url.chars().count()));
+                    out.state.cursor.set_char_range(Some(all));
+                    out.state.store(ui.ctx(), out.response.id);
+                }
                 ui.end_row();
             });
             let (ok, cancel) = buttons(ui, tl!("OK"));
