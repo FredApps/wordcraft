@@ -1,5 +1,7 @@
 //! Insert tab: pages, tables, pictures, shapes, links, bookmarks, headers/footers, text, symbols.
 
+use std::collections::BTreeSet;
+
 use serde_json::{Value, json};
 use wordcraft_doc::para::{Float, InlineObject, ShapeKind, Wrap};
 use wordcraft_doc::props::{Align, CharProps, Rgb, TabAlign, TabStop, TextColor};
@@ -732,6 +734,35 @@ fn strip_headers(doc: &mut wordcraft_doc::Document, ids: &[u32]) -> bool {
     any
 }
 
+fn story_has_page_field(doc: &wordcraft_doc::Document, story: StoryRef) -> bool {
+    let Some(blocks) = doc.story(story) else { return false };
+    let mut seen = BTreeSet::from([story]);
+    let mut pending: Vec<&Block> = blocks.iter().map(|b| &**b).collect();
+    while let Some(block) = pending.pop() {
+        let para = match block {
+            Block::Para(para) => para,
+            Block::Table(table) => {
+                pending.extend(table.rows.iter().flat_map(|r| &r.cells).flat_map(|c| &c.blocks).map(|b| &**b));
+                continue;
+            }
+        };
+        for object in &para.objects {
+            if matches!(object, InlineObject::Field { instr, .. } | InlineObject::FieldStart { instr, .. } if instr.split_whitespace().next().is_some_and(|name| name.eq_ignore_ascii_case("PAGE")))
+            {
+                return true;
+            }
+            for id in object.text_boxes() {
+                if let Some(part) = doc.parts.get(&id).filter(|part| part.kind == PartKind::TextBox)
+                    && seen.insert(StoryRef::Part(id))
+                {
+                    pending.extend(part.blocks.iter().map(|b| &**b));
+                }
+            }
+        }
+    }
+    false
+}
+
 fn page_number(s: &mut Session, v: &Value) -> CmdResult {
     let position = p::str(v, "position").unwrap_or("bottom");
     let align = match p::str(v, "align").unwrap_or("center") {
@@ -751,13 +782,10 @@ fn page_number(s: &mut Session, v: &Value) -> CmdResult {
     let header = position == "top";
     let id = hf_part(s, header);
     let story = StoryRef::Part(id);
-    // Preserve existing numbering wherever it lives, including inside a table. Field switches
-    // and case do not change PAGE's identity; PAGEREF and NUMPAGES are different fields.
-    if s.doc.para_paths(story).iter().filter_map(|path| s.doc.para(story, path)).any(|p| {
-        p.objects.iter().any(|object| {
-            matches!(object, InlineObject::Field { instr, .. } | InlineObject::FieldStart { instr, .. } if instr.split_whitespace().next().is_some_and(|name| name.eq_ignore_ascii_case("PAGE")))
-        })
-    }) {
+    // Follow tables and anchored text boxes iteratively, visiting each story once so cycles
+    // cannot hang insertion. PAGE in an unrelated story must not suppress this story's number.
+    // Field switches and case do not change PAGE's identity; PAGEREF and NUMPAGES are distinct.
+    if story_has_page_field(&s.doc, story) {
         return Ok(json!({"story": id}));
     }
     let style = if header { "Header" } else { "Footer" };
