@@ -734,7 +734,10 @@ fn paste_format(s: &mut Session, _: &Value) -> CmdResult {
         let f = s.sel.focus.clone();
         if let Some(pp) = s.doc.para_at(&f) {
             let (x, y) = pp.word_at(f.off);
-            s.doc.format_range(&Pos { off: x, ..f.clone() }, &Pos { off: y, ..f.clone() }, &|c| *c = chr.cleared().overlaid(&chr))?;
+            // Word selection includes trailing spaces; a painter click formats just the word,
+            // matching the ordinary collapsed-caret formatting target.
+            let word_end = pp.text.get(x..y).map(|word| x + word.trim_end().len()).unwrap_or(y);
+            s.doc.format_range(&Pos { off: x, ..f.clone() }, &Pos { off: word_end, ..f.clone() }, &|c| *c = chr.cleared().overlaid(&chr))?;
         }
         s.doc.format_paragraphs(&a, &b, &|p| *p = para.clone())?;
     } else {
