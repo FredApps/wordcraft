@@ -2,10 +2,10 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use wordcraft_doc::para::InlineObject;
+use wordcraft_doc::para::{GroupChild, InlineObject};
 use wordcraft_doc::props::{Align, CharProps};
-use wordcraft_doc::{Block, Document, Paragraph, Path, StoryRef, Table, para_block};
-use wordcraft_engine::Session;
+use wordcraft_doc::{Block, Document, Paragraph, PartKind, Path, StoryRef, Table, para_block};
+use wordcraft_engine::{Selection, Session};
 
 fn fields(doc: &Document, story: StoryRef, name: &str) -> usize {
     doc.para_paths(story)
@@ -70,16 +70,22 @@ fn numbering_preserves_content_formatting_selection_and_undo_redo() {
 
 #[test]
 fn existing_page_field_in_a_table_is_preserved_with_its_switches() {
-    let mut s = Session::new(Document::from_text("Body"));
-    let id = s.run("insert.footer", &json!({"text": "Keep footer"})).unwrap()["story"].as_u64().unwrap() as u32;
-    let mut table = Table::new(1, 1, 300.0);
-    let mut para = Paragraph::with_text("Existing page: ", CharProps::default());
-    para.insert_object(para.len(), field(" page \\* MERGEFORMAT "), &CharProps::default()).unwrap();
-    table.rows[0].cells[0].blocks = vec![para_block(para)];
-    s.doc.story_mut(StoryRef::Part(id)).unwrap().push(Arc::new(Block::Table(table)));
-    let before = s.doc.clone();
-    s.run("insert.pageNumber", &json!({"position": "bottom", "format": "x of y"})).unwrap();
-    assert_eq!(s.doc, before);
+    for depth in [1, 17] {
+        let mut s = Session::new(Document::from_text("Body"));
+        let id = s.run("insert.footer", &json!({"text": "Keep footer"})).unwrap()["story"].as_u64().unwrap() as u32;
+        let mut para = Paragraph::with_text("Existing page: ", CharProps::default());
+        para.insert_object(para.len(), field(" page \\* MERGEFORMAT "), &CharProps::default()).unwrap();
+        let mut blocks = vec![para_block(para)];
+        for _ in 0..depth {
+            let mut table = Table::new(1, 1, 300.0);
+            table.rows[0].cells[0].blocks = blocks;
+            blocks = vec![Arc::new(Block::Table(table))];
+        }
+        s.doc.story_mut(StoryRef::Part(id)).unwrap().extend(blocks);
+        let before = s.doc.clone();
+        s.run("insert.pageNumber", &json!({"position": "bottom", "format": "x of y"})).unwrap();
+        assert!(s.doc == before, "PAGE in a table nested {depth} deep must not be duplicated");
+    }
 }
 
 #[test]
@@ -129,4 +135,94 @@ fn fresh_numbering_uses_one_paragraph_and_current_position_stays_inline() {
     assert!(!s.doc.plain_text(StoryRef::Body).contains("selected"));
     s.run("edit.undo", &json!({})).unwrap();
     assert_eq!(s.doc, before);
+}
+
+#[test]
+fn existing_page_field_in_nested_text_boxes_is_preserved() {
+    for (command, position) in [("insert.header", "top"), ("insert.footer", "bottom")] {
+        for levels in [1, 2] {
+            let mut s = Session::new(Document::from_text("Body"));
+            let id = s.run(command, &json!({"text": "Keep this"})).unwrap()["story"].as_u64().unwrap() as u32;
+            let story = StoryRef::Part(id);
+            let box_id = s.run("insert.textBox", &json!({"text": "Existing page: "})).unwrap()["story"].as_u64().unwrap() as u32;
+            if levels == 2 {
+                // Imported stories can contain a nested box, even though the insert command
+                // does not offer one while the caret is already in a text box.
+                let inner = s.doc.add_part(PartKind::TextBox, vec![para_block(Paragraph::new())]);
+                let mut anchor = s.doc.para(story, &Path::top(0)).unwrap().objects.iter().find(|o| o.text_box() == Some(box_id)).unwrap().clone();
+                if let InlineObject::Shape { story, .. } = &mut anchor {
+                    *story = Some(inner);
+                }
+                s.doc.para_mut(StoryRef::Part(box_id), &Path::top(0)).unwrap().insert_object(0, anchor, &CharProps::default()).unwrap();
+                s.sel = Selection::caret(s.doc.end_of(StoryRef::Part(inner)));
+            }
+            s.run("insert.pageNumber", &json!({"position": "current"})).unwrap();
+            let before = s.doc.clone();
+            let selection = s.sel.clone();
+            s.run("insert.pageNumber", &json!({"position": position, "format": "x of y"})).unwrap();
+            assert_eq!(fields(&s.doc, story, "PAGE"), 0, "the text box already contains the page number");
+            assert_eq!(s.doc, before);
+            assert_eq!(s.sel, selection);
+            let mut back = s.doc.clone();
+            for _ in 0..2 {
+                back = wordcraft_docx::read(&wordcraft_docx::write(&back).unwrap()).unwrap();
+                assert_eq!(back.parts.keys().map(|id| fields(&back, StoryRef::Part(*id), "PAGE")).sum::<usize>(), 1);
+                assert_eq!(back.parts.keys().map(|id| fields(&back, StoryRef::Part(*id), "NUMPAGES")).sum::<usize>(), 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn existing_page_field_in_grouped_text_boxes_is_preserved() {
+    for (command, position) in [("insert.header", "top"), ("insert.footer", "bottom")] {
+        let mut s = Session::new(Document::from_text("Body"));
+        let id = s.run(command, &json!({"text": "Keep this"})).unwrap()["story"].as_u64().unwrap() as u32;
+        let story = StoryRef::Part(id);
+        let box_id = s.run("insert.textBox", &json!({"text": "Existing page: "})).unwrap()["story"].as_u64().unwrap() as u32;
+        s.run("insert.pageNumber", &json!({"position": "current"})).unwrap();
+        let anchor = s.doc.para_mut(story, &Path::top(0)).unwrap().objects.iter_mut().find(|o| o.text_box() == Some(box_id)).unwrap();
+        *anchor = InlineObject::Group {
+            w: 144.0,
+            h: 72.0,
+            float: Default::default(),
+            ch_w: 144.0,
+            ch_h: 72.0,
+            children: vec![GroupChild { x: 0.0, y: 0.0, obj: anchor.clone() }],
+            canvas: None,
+        };
+        let before = s.doc.clone();
+        let selection = s.sel.clone();
+        s.run("insert.pageNumber", &json!({"position": position})).unwrap();
+        assert_eq!(fields(&s.doc, story, "PAGE"), 0, "the grouped text box already contains the page number");
+        assert_eq!(s.doc, before);
+        assert_eq!(s.sel, selection);
+        let mut back = s.doc.clone();
+        for _ in 0..2 {
+            back = wordcraft_docx::read(&wordcraft_docx::write(&back).unwrap()).unwrap();
+            assert_eq!(back.parts.keys().map(|id| fields(&back, StoryRef::Part(*id), "PAGE")).sum::<usize>(), 1);
+        }
+    }
+}
+
+#[test]
+fn page_fields_in_unrelated_text_boxes_do_not_prevent_numbering() {
+    let mut s = Session::new(Document::from_text("Body"));
+    let box_id = s.run("insert.textBox", &json!({"text": "Body page: "})).unwrap()["story"].as_u64().unwrap() as u32;
+    s.run("insert.pageNumber", &json!({"position": "current"})).unwrap();
+    let footer = s.run("insert.footer", &json!({"text": "Keep footer"})).unwrap()["story"].as_u64().unwrap() as u32;
+    s.run("insert.pageNumber", &json!({"position": "bottom"})).unwrap();
+    assert_eq!(fields(&s.doc, StoryRef::Part(box_id), "PAGE"), 1);
+    assert_eq!(fields(&s.doc, StoryRef::Part(footer), "PAGE"), 1);
+}
+
+#[test]
+fn cyclic_text_box_references_do_not_block_numbering() {
+    let mut s = Session::new(Document::from_text("Body"));
+    let footer = s.run("insert.footer", &json!({"text": "Keep footer"})).unwrap()["story"].as_u64().unwrap() as u32;
+    let box_id = s.run("insert.textBox", &json!({"text": "A box"})).unwrap()["story"].as_u64().unwrap() as u32;
+    let anchor = s.doc.para(StoryRef::Part(footer), &Path::top(0)).unwrap().objects.iter().find(|o| o.text_box() == Some(box_id)).unwrap().clone();
+    s.doc.para_mut(StoryRef::Part(box_id), &Path::top(0)).unwrap().insert_object(0, anchor, &CharProps::default()).unwrap();
+    s.run("insert.pageNumber", &json!({"position": "bottom"})).unwrap();
+    assert_eq!(fields(&s.doc, StoryRef::Part(footer), "PAGE"), 1);
 }
