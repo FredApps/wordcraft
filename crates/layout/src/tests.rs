@@ -2477,7 +2477,7 @@ fn split_row_rejects_a_hostile_cut() {
         height,
         items: vec![line(0.0), line(150.0)],
         bottom,
-        cells: vec![CellPart { center: None, items: 0..2, end: Some(170.0) }],
+        cells: vec![CellPart { merge: None, center: None, items: 0..2, end: Some(170.0) }],
     };
     for cut in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -1.0, 200.0] {
         assert!(split_row(&row(200.0, 4.0), cut).is_none(), "{cut}");
@@ -2491,8 +2491,8 @@ fn split_row_rejects_a_hostile_cut() {
     }
     // Cell ranges past the items are ignored.
     let mut r = row(200.0, 4.0);
-    r.cells.push(CellPart { center: None, items: 5..9, end: None });
-    r.cells.push(CellPart { center: None, items: std::ops::Range { start: 2, end: 1 }, end: None });
+    r.cells.push(CellPart { merge: None, center: None, items: 5..9, end: None });
+    r.cells.push(CellPart { merge: None, center: None, items: std::ops::Range { start: 2, end: 1 }, end: None });
     assert!(split_row(&r, 100.0).is_some());
 }
 
@@ -4550,7 +4550,7 @@ fn a_split_row_moves_shading_below_the_cut_with_it() {
         height: 200.0,
         items: vec![line_row(0.0), line_row(150.0), fill(0.0, 200.0), fill(150.0, 50.0)],
         bottom: 0.0,
-        cells: vec![CellPart { center: None, items: 0..4, end: None }],
+        cells: vec![CellPart { merge: None, center: None, items: 0..4, end: None }],
     };
     let (a, b) = split_row(&row, 100.0).expect("splits");
     let fills = |r: &RowLayout| {
@@ -7333,8 +7333,12 @@ fn split_border_follows_content() {
     assert_eq!(l.pages.len(), 3);
 }
 
-#[test]
-fn split_merge_centers_first() {
+enum MergeBorders {
+    Grid,
+    Hidden,
+}
+
+fn merge_fragment_sample(borders: MergeBorders) -> DocLayout {
     use wordcraft_doc::props::{HeightRule, LineSpacing, VAlign, VMerge};
     let mut d = Document::new();
     d.last_section.page_h = 360.0;
@@ -7350,6 +7354,10 @@ fn split_merge_centers_first() {
         wordcraft_doc::para_block(p)
     };
     let mut t = Table::new(2, 2, 300.0);
+    if matches!(borders, MergeBorders::Hidden) {
+        let none = Some(Border::default());
+        t.props.borders = Some(Borders { top: none, bottom: none, left: none, right: none, between: none, inside_v: none });
+    }
     for (i, count) in [35, 55].into_iter().enumerate() {
         t.rows[i].props.height = Some(if i == 0 { 200.0 } else { 100.0 });
         t.rows[i].props.height_rule = HeightRule::AtLeast;
@@ -7359,7 +7367,12 @@ fn split_merge_centers_first() {
     t.rows[0].cells[0].blocks = vec![para("Label")];
     t.rows[0].cells[0].props.valign = Some(VAlign::Center);
     d.body = vec![std::sync::Arc::new(Block::Table(t))];
-    let l = lay(&d);
+    lay(&d)
+}
+
+#[test]
+fn split_merge_centers_first() {
+    let l = merge_fragment_sample(MergeBorders::Grid);
     let (page, y) = l
         .pages
         .iter()
@@ -7375,4 +7388,43 @@ fn split_merge_centers_first() {
     // Twenty-eight fitted10pt lines; existing top border leaves its matching inset.
     assert!((y - 171.5).abs() < 0.05, "label top {y}");
     assert_eq!(l.pages.len(), 4);
+}
+
+#[test]
+fn split_merge_closes_pages() {
+    let l = merge_fragment_sample(MergeBorders::Grid);
+    for (page, pg) in l.pages.iter().enumerate() {
+        let left = pg
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Placed::Cell { table, rect, cell: 0, .. } if table.0 == [0] => Some(*rect),
+                _ => None,
+            })
+            .unwrap();
+        let right = pg
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Placed::Cell { table, rect, cell: 1, .. } if table.0 == [0] => Some(*rect),
+                _ => None,
+            })
+            .unwrap();
+        for edge in [right.y, right.bottom()] {
+            assert!(
+                pg.items.iter().any(|it| matches!(it,
+                    Placed::Rule { x0, x1, y0, y1, .. }
+                    if *x0 <= left.x && *x1 >= left.right() && (*y0-edge).abs()<0.01 && (*y1-edge).abs()<0.01
+                )),
+                "page {page}, missing merge edge at {edge}"
+            );
+        }
+    }
+}
+
+#[test]
+fn merge_edges_keep_hidden_style() {
+    let l = merge_fragment_sample(MergeBorders::Hidden);
+    assert_eq!(l.pages.len(), 4);
+    assert!(!l.pages.iter().flat_map(|p| &p.items).any(|it| matches!(it, Placed::Rule { .. })));
 }

@@ -28,6 +28,15 @@ pub struct RowLayout {
 }
 
 /// A cell of a [`RowLayout`].
+#[derive(Clone)]
+pub(crate) struct MergeEdge {
+    pub(crate) key: (usize, usize),
+    pub(crate) x0: f32,
+    pub(crate) x1: f32,
+    pub(crate) top: Option<Border>,
+    pub(crate) bottom: Option<Border>,
+}
+
 pub(crate) struct CellCenter {
     offset: f32,
     height: f32,
@@ -35,6 +44,7 @@ pub(crate) struct CellCenter {
 }
 
 pub struct CellPart {
+    pub(crate) merge: Option<MergeEdge>,
     pub(crate) center: Option<CellCenter>,
     /// Its items in the row's `items` (its fill, text, borders and cell area).
     pub items: std::ops::Range<usize>,
@@ -663,6 +673,7 @@ pub fn layout_table(ctx: &mut Ctx, story: StoryRef, t: &Table, path: &[u32], ava
         .collect();
     // Second pass: place cells with their row height, fills and borders.
     let mut out = Vec::with_capacity(rows.len());
+    let mut merge_starts: std::collections::HashMap<usize, (usize, usize)> = std::collections::HashMap::new();
     for (ri, cells) in rows.into_iter().enumerate() {
         let rh = heights.get(ri).copied().unwrap_or(0.0);
         let exact = t.rows.get(ri).is_some_and(|r| r.props.height_rule == HeightRule::Exact && r.props.height.is_some_and(|h| h > 0.0));
@@ -742,6 +753,24 @@ pub fn layout_table(ctx: &mut Ctx, story: StoryRef, t: &Table, path: &[u32], ava
             // close the way Word draws them instead of leaving a notch at thick borders.
             let half = |o: Option<Border>| o.filter(Border::is_visible).map_or(0.0, |e| e.width / 2.0);
             let (hx0, hx1) = (x0 - half(b.left), x1 + half(b.right));
+            let merge = if c.vmerge == VMerge::None {
+                merge_starts.remove(&c.g);
+                None
+            } else {
+                let start = if c.vmerge == VMerge::Restart {
+                    ri
+                } else {
+                    merge_starts.get(&c.g).filter(|(_, last)| last.checked_add(1) == Some(ri)).map_or(ri, |(start, _)| *start)
+                };
+                merge_starts.insert(c.g, (start, ri));
+                Some(MergeEdge {
+                    key: (start, c.g),
+                    x0: hx0,
+                    x1: hx1,
+                    top: b.top.filter(Border::is_visible),
+                    bottom: b.bottom.filter(Border::is_visible),
+                })
+            };
             let top_vis = c.vmerge != VMerge::Continue;
             if top_vis && let Some(e) = b.top.filter(Border::is_visible) {
                 items.push(Placed::Rule { x0: hx0, y0, x1: hx1, y1: y0, border: e });
@@ -765,7 +794,7 @@ pub fn layout_table(ctx: &mut Ctx, story: StoryRef, t: &Table, path: &[u32], ava
                 story,
                 clip: exact && c.h > span_h + 0.01,
             });
-            parts.push(CellPart { items: first..items.len(), end, center });
+            parts.push(CellPart { items: first..items.len(), end, center, merge });
         }
         out.push(RowLayout {
             height: rh,
@@ -1036,7 +1065,7 @@ pub fn split_row(row: &RowLayout, cut: f32) -> Option<(RowLayout, RowLayout)> {
                 }
             }
         }
-        parts.push(CellPart { items: start..b.len(), end: c.end.filter(|_| center.is_none()).map(|e| e - shift), center: None });
+        parts.push(CellPart { items: start..b.len(), end: c.end.filter(|_| center.is_none()).map(|e| e - shift), center: None, merge: None });
     }
     // The part left on the page is placed and never split again.
     Some((
