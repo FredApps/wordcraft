@@ -4556,7 +4556,8 @@ fn a_split_row_moves_shading_below_the_cut_with_it() {
     let fills = |r: &RowLayout| {
         r.items.iter().filter_map(|i| if let Placed::Fill { rect, .. } = i { Some((rect.y, rect.h)) } else { None }).collect::<Vec<_>>()
     };
-    assert_eq!(fills(&a), vec![(0.0, 100.0)], "only the row's shading above the cut stays");
+    assert!(a.height < 100.0, "the first fragment ends with its fitted content");
+    assert_eq!(fills(&a), vec![(0.0, a.height)], "shading covers the first fragment");
     let moved = fills(&b);
     assert_eq!(moved.first().map(|f| f.0), Some(0.0), "the row's shading starts the continuation: {moved:?}");
     let nested = moved.get(1).copied().unwrap_or_default();
@@ -7297,4 +7298,37 @@ fn split_row_retains_minimum() {
     assert!((continuation.h - 200.5).abs() < 0.05, "{continuation:?}");
     let next = l.pages.iter().position(|page| page.items.iter().any(|it| matches!(it, Placed::Cell { row: 1, .. })));
     assert_eq!(next, Some(2));
+}
+
+#[test]
+fn split_border_follows_content() {
+    use wordcraft_doc::props::{HeightRule, LineSpacing};
+    let mut d = Document::new();
+    d.last_section.page_h = 360.0;
+    d.last_section.margin_top = 36.0;
+    d.last_section.margin_bottom = 36.0;
+    let mut t = Table::new(2, 1, 300.0);
+    t.rows[0].props.height = Some(200.0);
+    t.rows[0].props.height_rule = HeightRule::AtLeast;
+    let mut p = wordcraft_doc::Paragraph::with_text(&["Line"; 35].join("\n"), Default::default());
+    p.props.line_spacing = Some(LineSpacing::Exactly(10.0));
+    p.props.space_before = Some(0.0);
+    p.props.space_after = Some(0.0);
+    p.props.widow_control = Some(false);
+    t.rows[0].cells[0].blocks = vec![wordcraft_doc::para_block(p)];
+    t.rows[1].props.height = Some(100.0);
+    t.rows[1].props.height_rule = HeightRule::AtLeast;
+    d.body = vec![std::sync::Arc::new(Block::Table(t))];
+    let l = lay(&d);
+    let first = l.pages[0]
+        .items
+        .iter()
+        .find_map(|it| match it {
+            Placed::Cell { rect, row: 0, .. } => Some(*rect),
+            _ => None,
+        })
+        .unwrap();
+    // Word closes after the28 fitting10pt lines and existing top border.
+    assert!((first.h - 280.5).abs() < 0.05, "{first:?}");
+    assert_eq!(l.pages.len(), 3);
 }

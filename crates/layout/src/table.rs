@@ -852,6 +852,38 @@ pub fn split_row(row: &RowLayout, cut: f32) -> Option<(RowLayout, RowLayout)> {
     if !kept_any || first_moved == f32::MAX {
         return None;
     }
+    // Word closes the first fragment below its last fitted content.
+    // Nested boxes crossing the cut retain their geometry.
+    let mut kept_bottom = 0.0f32;
+    for (((items, splits), c), &moved_top) in cells.iter().zip(&splits).zip(&row.cells).zip(&moved) {
+        for (it, &split) in items.iter().zip(splits) {
+            let bottom = if let Some(r) = it.turned_bounds() {
+                fits(r.bottom()).then_some(r.bottom())
+            } else {
+                match it {
+                    Placed::Lines { para, l0, y, .. } if split > *l0 => crate::item_bottom(*y, para, *l0, split),
+                    Placed::Image { rect, .. } | Placed::Shape { rect, .. } | Placed::Graphic { rect, .. } | Placed::Clip { rect, .. }
+                        if fits(rect.bottom()) =>
+                    {
+                        Some(rect.bottom())
+                    }
+                    Placed::Cell { rect, table, .. } if Some(table.0.len()) > own_depth && rect.y < cut => Some(rect.bottom().min(cut)),
+                    _ => None,
+                }
+            };
+            if let Some(bottom) = bottom {
+                kept_bottom = kept_bottom.max(bottom);
+            }
+        }
+        if moved_top == f32::MAX
+            && let Some(end) = c.end.filter(|e| fits(*e))
+        {
+            kept_bottom = kept_bottom.max(end);
+        }
+    }
+    let floor = if row.min_height <= cut + 0.01 { row.min_height } else { cut };
+    let first_height = (kept_bottom + row.bottom).max(floor).min(cut);
+    let trim_first = |r: Rect| (r.y < first_height).then(|| Rect::new(r.x, r.y, r.w, r.h.min(first_height - r.y)));
     // How far up things move: each cell's first line that moves on goes to the top of the
     // continuation, keeping a little of the cell's top margin.
     let shift_to = |top: f32| (top - 2.0).max(0.0);
@@ -934,14 +966,14 @@ pub fn split_row(row: &RowLayout, cut: f32) -> Option<(RowLayout, RowLayout)> {
                 // continuation (a nested table's cell below the cut moves whole).
                 Placed::Fill { rect, color } => {
                     let (above, below) = split_rect(*rect, cut, geo_shift(rect.bottom(), shift));
-                    a.extend(above.map(|rect| Placed::Fill { rect, color: *color }));
+                    a.extend(above.and_then(trim_first).map(|rect| Placed::Fill { rect, color: *color }));
                     b.extend(below.map(|rect| Placed::Fill { rect, color: *color }));
                 }
                 Placed::Cell { rect, covered, table, row: r, cell, story, clip } => {
                     let (above, below) = split_rect(*rect, cut, geo_shift(rect.bottom(), shift));
                     let cell_at =
                         |rect| Placed::Cell { rect, covered: *covered, table: table.clone(), row: *r, cell: *cell, story: *story, clip: *clip };
-                    a.extend(above.map(cell_at));
+                    a.extend(above.and_then(trim_first).map(cell_at));
                     b.extend(below.map(cell_at));
                 }
                 Placed::Rule { x0, y0, x1, y1, border } => {
@@ -951,7 +983,7 @@ pub fn split_row(row: &RowLayout, cut: f32) -> Option<(RowLayout, RowLayout)> {
                             a.push(it.clone());
                             b.push(Placed::Rule { x0: *x0, y0: 0.0, x1: *x1, y1: 0.0, border: *border });
                         } else if *y0 >= row.height - 0.01 {
-                            a.push(Placed::Rule { x0: *x0, y0: cut, x1: *x1, y1: cut, border: *border });
+                            a.push(Placed::Rule { x0: *x0, y0: first_height, x1: *x1, y1: first_height, border: *border });
                             b.push(Placed::Rule { x0: *x0, y0: y0 - rest, x1: *x1, y1: y1 - rest, border: *border });
                         } else if *y0 <= cut {
                             a.push(it.clone());
@@ -960,8 +992,8 @@ pub fn split_row(row: &RowLayout, cut: f32) -> Option<(RowLayout, RowLayout)> {
                         }
                     } else {
                         let (t, bt) = (y0.min(*y1), y0.max(*y1));
-                        if t < cut {
-                            a.push(Placed::Rule { x0: *x0, y0: t, x1: *x1, y1: bt.min(cut), border: *border });
+                        if t < first_height {
+                            a.push(Placed::Rule { x0: *x0, y0: t, x1: *x1, y1: bt.min(first_height), border: *border });
                         }
                         if bt > cut {
                             let shift = geo_shift(bt, shift);
@@ -975,7 +1007,7 @@ pub fn split_row(row: &RowLayout, cut: f32) -> Option<(RowLayout, RowLayout)> {
     }
     // The part left on the page is placed and never split again.
     Some((
-        RowLayout { height: cut, min_height: 0.0, items: a, bottom: row.bottom, cells: Vec::new() },
+        RowLayout { height: first_height, min_height: 0.0, items: a, bottom: row.bottom, cells: Vec::new() },
         RowLayout { height, min_height, items: b, bottom: row.bottom, cells: parts },
     ))
 }
