@@ -12,6 +12,7 @@ mod crypt;
 mod custom;
 mod flat;
 mod fonts;
+mod mail_merge;
 mod package;
 mod read;
 mod smart_art;

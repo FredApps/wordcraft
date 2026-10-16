@@ -397,7 +397,7 @@ pub(crate) fn write_parts(doc: &Document, flavor: Flavor) -> Result<Vec<(String,
     let mut settings_rels = PartRels::default();
     let template = doc.settings.attached_template.as_deref().map(str::trim).filter(|t| !t.is_empty());
     let template_rel = template.map(|t| settings_rels.add(rt::ATTACHED_TEMPLATE, t, true));
-    let mail_merge = mail_merge::write(doc, &mut settings_rels)?;
+    let mail_merge = mail_merge::write(doc, &mut settings_rels, &mut wr.embeds)?;
     push_part(
         &mut entries,
         &mut overrides,
