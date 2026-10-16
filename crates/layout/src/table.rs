@@ -28,7 +28,14 @@ pub struct RowLayout {
 }
 
 /// A cell of a [`RowLayout`].
+pub(crate) struct CellCenter {
+    offset: f32,
+    height: f32,
+    content: std::ops::Range<usize>,
+}
+
 pub struct CellPart {
+    pub(crate) center: Option<CellCenter>,
     /// Its items in the row's `items` (its fill, text, borders and cell area).
     pub items: std::ops::Range<usize>,
     /// Where its content ends below the row's top, its last paragraph's space after included
@@ -719,10 +726,16 @@ pub fn layout_table(ctx: &mut Ctx, story: StoryRef, t: &Table, path: &[u32], ava
                     it.turn(tn.turn, ox, oy);
                 }
             }
+            let content_start = items.len();
             for mut it in cell_items {
                 it.translate(0.0, dy);
                 items.push(it);
             }
+            let center = (c.vmerge == VMerge::Restart && c.valign == VAlign::Center && !exact && dy > 0.0).then_some(CellCenter {
+                offset: dy,
+                height: c.h,
+                content: content_start..items.len(),
+            });
             let b = c.borders;
             let (x0, x1, y0, y1) = (c.x, c.x + c.w, 0.0, rh);
             // Horizontal edges run on over half of each visible vertical edge, so the corners
@@ -752,7 +765,7 @@ pub fn layout_table(ctx: &mut Ctx, story: StoryRef, t: &Table, path: &[u32], ava
                 story,
                 clip: exact && c.h > span_h + 0.01,
             });
-            parts.push(CellPart { items: first..items.len(), end });
+            parts.push(CellPart { items: first..items.len(), end, center });
         }
         out.push(RowLayout {
             height: rh,
@@ -854,8 +867,9 @@ pub fn split_row(row: &RowLayout, cut: f32) -> Option<(RowLayout, RowLayout)> {
     }
     // Word closes the first fragment below its last fitted content.
     // Nested boxes crossing the cut retain their geometry.
-    let mut kept_bottom = 0.0f32;
+    let mut kept_bottoms = Vec::with_capacity(cells.len());
     for (((items, splits), c), &moved_top) in cells.iter().zip(&splits).zip(&row.cells).zip(&moved) {
+        let mut kept_bottom = 0.0f32;
         for (it, &split) in items.iter().zip(splits) {
             let bottom = if let Some(r) = it.turned_bounds() {
                 fits(r.bottom()).then_some(r.bottom())
@@ -880,8 +894,18 @@ pub fn split_row(row: &RowLayout, cut: f32) -> Option<(RowLayout, RowLayout)> {
         {
             kept_bottom = kept_bottom.max(end);
         }
+        kept_bottoms.push(kept_bottom);
     }
     let floor = if row.min_height <= cut + 0.01 { row.min_height } else { cut };
+    let plain_bottom = kept_bottoms.iter().zip(&row.cells).filter(|(_, c)| c.center.is_none()).map(|(b, _)| *b).fold(0.0f32, f32::max);
+    let plain_height = (plain_bottom + row.bottom).max(floor).min(cut);
+    // A fitting merged label uses the first physical fragment's vertical center.
+    let kept_bottom = kept_bottoms
+        .iter()
+        .zip(&row.cells)
+        .filter(|(_, c)| c.center.as_ref().is_none_or(|v| v.height > plain_height + 0.01))
+        .map(|(b, _)| *b)
+        .fold(0.0f32, f32::max);
     let first_height = (kept_bottom + row.bottom).max(floor).min(cut);
     let trim_first = |r: Rect| (r.y < first_height).then(|| Rect::new(r.x, r.y, r.w, r.h.min(first_height - r.y)));
     // How far up things move: each cell's first line that moves on goes to the top of the
@@ -909,7 +933,16 @@ pub fn split_row(row: &RowLayout, cut: f32) -> Option<(RowLayout, RowLayout)> {
     let mut parts = Vec::with_capacity(cells.len());
     for (((c, items), splits), &shift) in row.cells.iter().zip(&cells).zip(&splits).zip(&shifts) {
         let start = b.len();
-        for (it, &split) in items.iter().zip(splits) {
+        let center = c.center.as_ref().filter(|v| v.height <= plain_height + 0.01);
+        for (index, (it, &split)) in items.iter().zip(splits).enumerate() {
+            if let Some(center) = center
+                && center.content.contains(&(c.items.start + index))
+            {
+                let mut it = it.clone();
+                it.translate(0.0, ((first_height - center.height) / 2.0).max(0.0) - center.offset);
+                a.push(it);
+                continue;
+            }
             if let Some(r) = it.turned_bounds() {
                 let mut it = it.clone();
                 if fits(r.bottom()) {
@@ -1003,7 +1036,7 @@ pub fn split_row(row: &RowLayout, cut: f32) -> Option<(RowLayout, RowLayout)> {
                 }
             }
         }
-        parts.push(CellPart { items: start..b.len(), end: c.end.map(|e| e - shift) });
+        parts.push(CellPart { items: start..b.len(), end: c.end.filter(|_| center.is_none()).map(|e| e - shift), center: None });
     }
     // The part left on the page is placed and never split again.
     Some((

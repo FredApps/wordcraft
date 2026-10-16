@@ -2477,7 +2477,7 @@ fn split_row_rejects_a_hostile_cut() {
         height,
         items: vec![line(0.0), line(150.0)],
         bottom,
-        cells: vec![CellPart { items: 0..2, end: Some(170.0) }],
+        cells: vec![CellPart { center: None, items: 0..2, end: Some(170.0) }],
     };
     for cut in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -1.0, 200.0] {
         assert!(split_row(&row(200.0, 4.0), cut).is_none(), "{cut}");
@@ -2491,8 +2491,8 @@ fn split_row_rejects_a_hostile_cut() {
     }
     // Cell ranges past the items are ignored.
     let mut r = row(200.0, 4.0);
-    r.cells.push(CellPart { items: 5..9, end: None });
-    r.cells.push(CellPart { items: std::ops::Range { start: 2, end: 1 }, end: None });
+    r.cells.push(CellPart { center: None, items: 5..9, end: None });
+    r.cells.push(CellPart { center: None, items: std::ops::Range { start: 2, end: 1 }, end: None });
     assert!(split_row(&r, 100.0).is_some());
 }
 
@@ -4550,7 +4550,7 @@ fn a_split_row_moves_shading_below_the_cut_with_it() {
         height: 200.0,
         items: vec![line_row(0.0), line_row(150.0), fill(0.0, 200.0), fill(150.0, 50.0)],
         bottom: 0.0,
-        cells: vec![CellPart { items: 0..4, end: None }],
+        cells: vec![CellPart { center: None, items: 0..4, end: None }],
     };
     let (a, b) = split_row(&row, 100.0).expect("splits");
     let fills = |r: &RowLayout| {
@@ -7331,4 +7331,48 @@ fn split_border_follows_content() {
     // Word closes after the28 fitting10pt lines and existing top border.
     assert!((first.h - 280.5).abs() < 0.05, "{first:?}");
     assert_eq!(l.pages.len(), 3);
+}
+
+#[test]
+fn split_merge_centers_first() {
+    use wordcraft_doc::props::{HeightRule, LineSpacing, VAlign, VMerge};
+    let mut d = Document::new();
+    d.last_section.page_h = 360.0;
+    d.last_section.margin_top = 36.0;
+    d.last_section.margin_bottom = 36.0;
+    let para = |text: &str| {
+        let mut p =
+            wordcraft_doc::Paragraph::with_text(text, wordcraft_doc::CharProps { font: Some("Arial".into()), size: Some(9.0), ..Default::default() });
+        p.props.line_spacing = Some(LineSpacing::Exactly(10.0));
+        p.props.space_before = Some(0.0);
+        p.props.space_after = Some(0.0);
+        p.props.widow_control = Some(false);
+        wordcraft_doc::para_block(p)
+    };
+    let mut t = Table::new(2, 2, 300.0);
+    for (i, count) in [35, 55].into_iter().enumerate() {
+        t.rows[i].props.height = Some(if i == 0 { 200.0 } else { 100.0 });
+        t.rows[i].props.height_rule = HeightRule::AtLeast;
+        t.rows[i].cells[1].blocks = vec![para(&vec!["Line"; count].join("\n"))];
+        t.rows[i].cells[0].props.vmerge = if i == 0 { VMerge::Restart } else { VMerge::Continue };
+    }
+    t.rows[0].cells[0].blocks = vec![para("Label")];
+    t.rows[0].cells[0].props.valign = Some(VAlign::Center);
+    d.body = vec![std::sync::Arc::new(Block::Table(t))];
+    let l = lay(&d);
+    let (page, y) = l
+        .pages
+        .iter()
+        .enumerate()
+        .find_map(|(page, pg)| {
+            pg.items.iter().find_map(|it| match it {
+                Placed::Lines { path, y, .. } if path.0 == [0, 0, 0, 0] => Some((page, *y)),
+                _ => None,
+            })
+        })
+        .unwrap();
+    assert_eq!(page, 0, "the fitting merge label belongs to the first physical fragment");
+    // Twenty-eight fitted10pt lines; existing top border leaves its matching inset.
+    assert!((y - 171.5).abs() < 0.05, "label top {y}");
+    assert_eq!(l.pages.len(), 4);
 }
