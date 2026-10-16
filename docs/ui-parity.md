@@ -62,7 +62,12 @@ A one-use painter applies on mouse release even when the target is a collapsed c
 then disarms. For that caret case, character formatting covers the target word without
 its trailing spaces, matching ordinary collapsed-caret formatting. A dragged or explicit
 selection keeps its selected range. Copy Formatting / Paste Formatting uses the same
-engine command; the browser-reserved Copy Formatting shortcut remains a separate issue.
+engine command. Web Copy Formatting also advertises Ctrl/Command+Alt+Shift+C through
+the normal customizable shortcut registry, avoiding the browser inspector and preserving
+the copyright and Keep Text Only bindings. Native defaults remain unchanged. Trusted
+Chromium keyboard input passed in direct and same-origin iframe views, including alias
+display, removal, reassignment, copyright insertion and strict saved-DOCX checks. Native
+physical-mouse qualification remains pending.
 
 ## Revision history
 

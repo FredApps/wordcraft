@@ -592,3 +592,5 @@ Ranked, to beta (detail and remaining milestones in [docs/roadmap.md](docs/roadm
 | 2026-10-09 | minor | Recently landed: RTL, Ukrainian and Brazilian Portuguese |
 | 2026-10-06 | major | First honest estimate: 88% catalog, ~62% real parity, alpha ~85% of the way |
 | 2026-10-12 | trivial | Progress log: recipient filter and sort, .xls and legacy-encoding recipient lists (#778) |
+
+| 2026-10-16 | minor | #1455 follow-up: web Copy Formatting alias validated with trusted Chromium input in direct and same-origin iframe views; copyright and plain-text paste shortcuts preserved. Native physical-mouse qualification remains pending. |
