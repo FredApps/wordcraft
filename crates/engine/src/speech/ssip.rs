@@ -163,6 +163,52 @@ fn ok(code: u16) -> std::io::Result<()> {
     if (200..300).contains(&code) { Ok(()) } else { Err(std::io::Error::other(format!("Speech Dispatcher refused a command ({code})"))) }
 }
 
+/// Most voices kept from the server's list (it lists every variant of every voice: thousands).
+const MAX_VOICES: usize = 2000;
+
+/// The plain voices in a `LIST SYNTHESIS_VOICES` reply line (`249-name<TAB>lang<TAB>variant`), as
+/// (name, language); variants are left out, since each voice has dozens.
+fn voice_line(line: &str) -> Option<(String, String)> {
+    let mut f = line.strip_prefix("249-")?.split('\t');
+    let (name, lang, variant) = (f.next()?, f.next()?, f.next().unwrap_or("none"));
+    (variant == "none" && plain_voice(name).is_some() && !lang.is_empty()).then(|| (name.to_string(), lang.to_string()))
+}
+
+/// The server's synthesis voices, as (name, language).
+pub(super) fn list_voices(stream: &UnixStream) -> std::io::Result<Vec<(String, String)>> {
+    stream.set_read_timeout(Some(POLL))?;
+    stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
+    let mut w = stream;
+    let mut lines = Lines { reader: BufReader::new(stream.try_clone()?), pending: String::new() };
+    let mut ended = false;
+    ok(command(&mut w, &mut lines, "SET SELF CLIENT_NAME user:wordcraft:read-aloud", &mut ended)?)?;
+    w.write_all(b"LIST SYNTHESIS_VOICES\r\n")?;
+    let mut out = Vec::new();
+    let start = std::time::Instant::now();
+    loop {
+        match lines.next()? {
+            Some(line) => match final_code(&line) {
+                Some(code) if (700..800).contains(&code) => {}
+                Some(code) => {
+                    ok(code)?;
+                    break;
+                }
+                None => {
+                    if out.len() < MAX_VOICES
+                        && let Some(v) = voice_line(&line)
+                    {
+                        out.push(v);
+                    }
+                }
+            },
+            None if start.elapsed() > REPLY_TIMEOUT => return Err(ErrorKind::TimedOut.into()),
+            None => {}
+        }
+    }
+    let _ = command(&mut w, &mut lines, "QUIT", &mut ended);
+    Ok(out)
+}
+
 /// Speak `req` over `stream`, cancelling it when `changed()`.
 pub(super) fn converse(stream: &UnixStream, req: &Request<'_>, changed: &dyn Fn() -> bool) -> std::io::Result<Outcome> {
     stream.set_read_timeout(Some(POLL))?;
@@ -302,6 +348,32 @@ mod tests {
         assert!(got.contains(&"CANCEL self".to_string()), "{got:?}");
         assert!(!got.iter().any(|l| l.eq_ignore_ascii_case("CANCEL all")));
         assert!(!got.iter().any(|l| l.starts_with("SET SELF LANGUAGE")), "no language, no command");
+    }
+
+    #[test]
+    fn the_voice_list_keeps_the_plain_voices() {
+        assert_eq!(voice_line("249-Hungarian\thu\tnone"), Some(("Hungarian".into(), "hu".into())));
+        assert_eq!(voice_line("249-Hungarian+Adam\thu\tAdam"), None, "a variant");
+        assert_eq!(voice_line("249 OK VOICE LIST SENT"), None);
+        assert_eq!(voice_line("249-\thu\tnone"), None);
+        let (client, mut srv) = UnixStream::pair().unwrap();
+        let h = std::thread::spawn(move || {
+            let mut r = BufReader::new(srv.try_clone().unwrap());
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            srv.write_all(b"208 OK CLIENT NAME SET\r\n").unwrap();
+            line.clear();
+            r.read_line(&mut line).unwrap();
+            assert_eq!(line, "LIST SYNTHESIS_VOICES\r\n");
+            srv.write_all(b"249-Afrikaans\taf\tnone\r\n249-Afrikaans+Adam\taf\tAdam\r\n249-Hungarian\thu\tnone\r\n249 OK VOICE LIST SENT\r\n")
+                .unwrap();
+            line.clear();
+            let _ = r.read_line(&mut line);
+            let _ = srv.write_all(b"231 HAPPY HACKING\r\n");
+        });
+        let v = list_voices(&client).unwrap();
+        assert_eq!(v, [("Afrikaans".to_string(), "af".to_string()), ("Hungarian".to_string(), "hu".to_string())]);
+        h.join().unwrap();
     }
 
     #[test]

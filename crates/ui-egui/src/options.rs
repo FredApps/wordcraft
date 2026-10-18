@@ -447,9 +447,41 @@ fn accessibility(app: &mut WordApp, ui: &mut Ui) {
             let _ = app.run("readAloud.speed", json!({"value": rate}));
         }
     });
+    voice_picker(app, ui);
     let mut skip = app.session.read_aloud.skip_citations;
     if ui.checkbox(&mut skip, tl!("Skip citations & bibliography")).changed() {
         let _ = app.run("readAloud.skipCitations", json!({"value": skip}));
+    }
+}
+
+/// The Read Aloud voice: Automatic (each sentence in the voice of its language) or an installed
+/// voice. The list is asked for in the background; until it arrives only Automatic shows.
+fn voice_picker(app: &mut WordApp, ui: &mut Ui) {
+    let voices = wordcraft_engine::speech::installed_voices();
+    if voices.is_none() {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+    }
+    let voices = voices.unwrap_or_default();
+    let chosen = app.session.read_aloud.voice();
+    let label = |v: &wordcraft_engine::speech::Voice| format!("{} ({})", v.name, v.lang);
+    let shown =
+        chosen.as_deref().map_or_else(|| tl!("Automatic").to_string(), |id| voices.iter().find(|v| v.id == id).map_or_else(|| id.to_string(), label));
+    let mut pick: Option<Option<String>> = None;
+    ui.horizontal(|ui| {
+        ui.label(tl!("Voice"));
+        egui::ComboBox::from_id_salt("read-aloud-voice").selected_text(shown).width(260.0).show_ui(ui, |ui| {
+            if ui.selectable_label(chosen.is_none(), tl!("Automatic")).clicked() {
+                pick = Some(None);
+            }
+            for v in voices {
+                if ui.selectable_label(chosen.as_deref() == Some(v.id.as_str()), label(v)).clicked() {
+                    pick = Some(Some(v.id.clone()));
+                }
+            }
+        });
+    });
+    if let Some(id) = pick {
+        let _ = app.run("readAloud.voice", json!({"value": id}));
     }
 }
 
@@ -1007,7 +1039,8 @@ mod tests {
         assert!(h.query_by_label("Animation effects:").is_some());
         assert!(h.query_by_label("Your system has animation effects turned off.").is_some());
         assert!(!h.state().animations_on());
-        h.get_by_role(egui::accesskit::Role::ComboBox).click();
+        // The first list on the page; the Read Aloud voice list follows it.
+        h.query_all_by_role(egui::accesskit::Role::ComboBox).next().unwrap().click();
         h.run_steps(4);
         h.get_by_label("On").click();
         h.run_steps(4);
