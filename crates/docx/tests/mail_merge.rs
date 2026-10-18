@@ -208,6 +208,7 @@ fn oversized_mail_merge_relationships_keep_owned_settings() {
     let size_limit = format!(r#"<Relationship Id="unused" Type="{R}/image" Target="{}"/>"#, "x".repeat(1024 * 1024));
     let settings = r#"<w:trackRevisions/><w:autoHyphenation/><w:mailMerge><w:mainDocumentType w:val="formLetters"/></w:mailMerge>"#;
     for rels in [count_limit, size_limit] {
+        let rels = format!("{}{rels}", source_rels());
         let referenced = format!("<w:trackRevisions/>{}", merge());
         let doc = wordcraft_docx::read(&fixture(&referenced, &rels)).unwrap();
         assert!(doc.settings.track_changes);
