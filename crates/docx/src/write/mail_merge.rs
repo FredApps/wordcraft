@@ -78,6 +78,16 @@ pub(super) fn write(doc: &Document, out: &mut PartRels, embeds: &mut super::embe
             }
             recipient_seen = true;
         }
+        let source_type = match e.name.as_str() {
+            "w:dataSource" | "w:src" => Some("mailMergeSource"),
+            "w:headerSource" => Some("mailMergeHeaderSource"),
+            _ => None,
+        };
+        if source_type.is_some()
+            && (e.attrs.iter().filter(|(name, _)| name == "r:id").count() != 1 || e.attr("r:id").is_none_or(|id| id.trim().is_empty()))
+        {
+            return Err(DocxError::MailMerge("expected one nonempty source relationship ID".into()));
+        }
         for (name, id) in &mut e.attrs {
             if name != "r:id" {
                 continue;
@@ -91,8 +101,9 @@ pub(super) fn write(doc: &Document, out: &mut PartRels, embeds: &mut super::embe
             let target = rel.attr("Target").unwrap_or("");
             let external = rel.attr("TargetMode").is_some_and(|v| v.eq_ignore_ascii_case("External"));
             let source = ["mailMergeSource", "mailMergeHeaderSource"].iter().any(|suffix| {
-                kind == format!("http://schemas.openxmlformats.org/officeDocument/2006/relationships/{suffix}")
-                    || kind == format!("http://purl.oclc.org/ooxml/officeDocument/relationships/{suffix}")
+                source_type.is_none_or(|expected| expected == *suffix)
+                    && (kind == format!("http://schemas.openxmlformats.org/officeDocument/2006/relationships/{suffix}")
+                        || kind == format!("http://purl.oclc.org/ooxml/officeDocument/relationships/{suffix}"))
             });
             if target.trim().is_empty() || if recipient { external || !crate::mail_merge::recipient_kind(kind) } else { !external || !source } {
                 return Err(DocxError::MailMerge(format!(
