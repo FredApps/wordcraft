@@ -1,6 +1,7 @@
 //! [`Document`] → DOCX.
 
 mod embed;
+mod glossary;
 mod mail_merge;
 mod settings_merge;
 pub(crate) use mail_merge::keep_rels as mail_merge_rels;
@@ -263,6 +264,13 @@ pub(crate) fn write_parts(doc: &Document, flavor: Flavor) -> Result<Vec<(String,
             &format!("{CT_WML}{}+xml", if footer { "footer" } else { "header" }),
             prels,
         );
+    }
+
+    // The glossary: kept verbatim while its entries are as read and its parts were kept, else
+    // written from the model (before the notes: references its entries hold are collected too).
+    if glossary::edited(doc) || (!doc.glossary.is_empty() && !wr.embeds.kept_glossary()) {
+        wr.embeds.drop_glossary = true;
+        wr.glossary(&mut entries, &mut overrides, &mut rels);
     }
 
     // Notes (references were collected from the body and headers).
