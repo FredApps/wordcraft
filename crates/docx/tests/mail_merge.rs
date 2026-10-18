@@ -201,3 +201,24 @@ fn unrecognised_mail_merge_markup_is_not_silently_dropped() {
     let doc = wordcraft_docx::read(&fixture(&merge, &source_rels())).unwrap();
     assert!(wordcraft_docx::write(&doc).unwrap_err().to_string().contains("unrecognised namespace"));
 }
+
+#[test]
+fn oversized_mail_merge_relationships_keep_owned_settings() {
+    let count_limit = (0..1024).map(|i| format!(r#"<Relationship Id="unused{i}" Type="{R}/image" Target="unused.png"/>"#)).collect::<String>();
+    let size_limit = format!(r#"<Relationship Id="unused" Type="{R}/image" Target="{}"/>"#, "x".repeat(1024 * 1024));
+    let settings = r#"<w:trackRevisions/><w:autoHyphenation/><w:mailMerge><w:mainDocumentType w:val="formLetters"/></w:mailMerge>"#;
+    for rels in [count_limit, size_limit] {
+        let referenced = format!("<w:trackRevisions/>{}", merge());
+        let doc = wordcraft_docx::read(&fixture(&referenced, &rels)).unwrap();
+        assert!(doc.settings.track_changes);
+        assert!(wordcraft_docx::write(&doc).unwrap_err().to_string().contains("mail merge"));
+        let mut doc = wordcraft_docx::read(&fixture(settings, &rels)).unwrap();
+        for _ in 0..2 {
+            assert!(doc.settings.track_changes, "relationship limits must not reset Track Changes");
+            assert!(doc.settings.auto_hyphenation, "relationship limits must not reset hyphenation");
+            let saved = wordcraft_docx::write(&doc).unwrap();
+            assert_eq!(elements(&part(&saved, "word/settings.xml"), "w:mailMerge").len(), 1);
+            doc = wordcraft_docx::read(&saved).unwrap();
+        }
+    }
+}

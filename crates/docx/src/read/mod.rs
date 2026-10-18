@@ -1060,7 +1060,13 @@ impl Reader<'_> {
         }
         let rels = self.pkg.rels(path);
         if mail_merge {
-            self.doc.passthrough.insert(crate::package::MAIL_MERGE_RELS.into(), Arc::new(crate::write::mail_merge_rels(&rels)?));
+            // Relationship limits must not stop import of the owned settings below.
+            match crate::write::mail_merge_rels(&rels) {
+                Ok(kept) => {
+                    self.doc.passthrough.insert(crate::package::MAIL_MERGE_RELS.into(), Arc::new(kept));
+                }
+                Err(e) => log::warn!("docx: not keeping mail merge relationships: {e}"),
+            }
         }
         let s = &mut self.doc.settings;
         for k in root.els() {
