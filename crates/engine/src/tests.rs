@@ -163,6 +163,11 @@ fn word_default_shortcuts_resolve() {
         assert_eq!(id("Alt+F1"), Some("fields.next"));
     }
     assert_eq!(id("Mod+PageUp"), Some("edit.findPrevious"));
+    // The Spike: Word's Ctrl+F3 and Ctrl+Shift+F3 (⌘F3 and ⌘⇧F3 in Word for Mac).
+    assert_eq!(id("Mod+F3"), Some("edit.spike"));
+    assert_eq!(id("Mod+Shift+F3"), Some("edit.insertSpike"));
+    assert_eq!(id("F3"), Some("edit.findNext"));
+    assert_eq!(id("Shift+F3"), Some("format.changeCase"));
     assert_eq!(id("F12"), Some("file.saveAs"));
     assert_eq!(id("Mod+Alt+M"), Some("review.newComment"));
     assert_eq!(id("Mod+H"), Some("edit.findReplace"));
@@ -1438,6 +1443,102 @@ fn clipboard_pane_collects_copies_and_pastes_one_undoably() {
     assert!(s.run("edit.pasteClipboardItem", &json!({"index": 0})).is_err());
 }
 
+fn spiked(s: &Session) -> Option<String> {
+    s.building_blocks.get("Spike").map(|f| f.plain_text())
+}
+
+#[test]
+fn spike_collects_cuts_and_insert_spike_pastes_them_and_empties_it() {
+    let mut s = Session::new(wordcraft_doc::Document::from_text("Alpha beta gamma.\n"));
+    run(&mut s, "select.text", json!({"text": "beta"}));
+    run(&mut s, "edit.copy", json!({}));
+    run(&mut s, "select.text", json!({"text": "Alpha"}));
+    run(&mut s, "edit.spike", json!({}));
+    run(&mut s, "select.text", json!({"text": "gamma"}));
+    run(&mut s, "edit.spike", json!({}));
+    assert_eq!(text(&s), " beta .\n", "Ctrl+F3 cuts");
+    assert_eq!(spiked(&s).as_deref(), Some("Alpha\ngamma\n"), "each piece is followed by a paragraph mark");
+    assert_eq!((s.clipboard_text.as_str(), s.clip_history.len()), ("beta", 1), "the clipboard is left alone");
+    // Ctrl+Shift+F3 on the empty last paragraph: everything, in the order it was collected.
+    run(&mut s, "caret.docEnd", json!({}));
+    run(&mut s, "edit.insertSpike", json!({}));
+    assert_eq!(text(&s), " beta .\nAlpha\ngamma\n");
+    assert_eq!(spiked(&s), None, "Ctrl+Shift+F3 empties the Spike");
+    assert!(matches!(s.run("edit.insertSpike", &json!({})), Err(crate::CmdError::Disabled(_))));
+}
+
+#[test]
+fn spike_keeps_character_formatting() {
+    let mut s = Session::new(wordcraft_doc::Document::from_text("Bold plain\n"));
+    run(&mut s, "select.text", json!({"text": "Bold"}));
+    run(&mut s, "format.bold", json!({}));
+    run(&mut s, "edit.spike", json!({}));
+    run(&mut s, "caret.docEnd", json!({}));
+    run(&mut s, "edit.insertSpike", json!({}));
+    assert_eq!(text(&s), " plain\nBold\n");
+    let p = s.doc.para_at(&Pos::body(1, 0)).unwrap();
+    assert_eq!(p.props_of_char(0).bold, Some(true));
+}
+
+#[test]
+fn spike_and_insert_spike_are_one_undo_step_each() {
+    let mut s = Session::new(wordcraft_doc::Document::from_text("one two\n"));
+    run(&mut s, "select.text", json!({"text": "one"}));
+    run(&mut s, "edit.spike", json!({}));
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(text(&s), "one two\n");
+    assert_eq!(spiked(&s).as_deref(), Some("one\n"), "like Cut and the clipboard, undo leaves the Spike as it is");
+    run(&mut s, "caret.docEnd", json!({}));
+    let before = text(&s);
+    run(&mut s, "edit.insertSpike", json!({}));
+    assert_eq!(text(&s), "one two\none\n");
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(text(&s), before);
+}
+
+#[test]
+fn spike_needs_a_selection() {
+    let mut s = Session::new(wordcraft_doc::Document::from_text("one two"));
+    let r = s.run("edit.spike", &json!({}));
+    assert!(matches!(r, Err(crate::CmdError::Disabled(_))), "{r:?}");
+    assert_eq!(spiked(&s), None);
+    assert_eq!(text(&s), "one two");
+}
+
+#[test]
+fn autotext_inserts_the_spike_without_emptying_it() {
+    let mut s = Session::new(wordcraft_doc::Document::from_text("Alpha beta\n"));
+    run(&mut s, "select.text", json!({"text": "Alpha"}));
+    run(&mut s, "edit.spike", json!({}));
+    run(&mut s, "caret.docEnd", json!({}));
+    run(&mut s, "insert.autoText", json!({"insert": "Spike"}));
+    run(&mut s, "insert.autoText", json!({"insert": "Spike"}));
+    assert_eq!(text(&s), " beta\nAlpha\nAlpha\n");
+    assert_eq!(spiked(&s).as_deref(), Some("Alpha\n"));
+}
+
+#[test]
+fn spike_outside_the_editable_regions_changes_nothing() {
+    let mut s = Session::new(wordcraft_doc::Document::from_text("Locked intro.\nFill in here.\n"));
+    run(&mut s, "select.text", json!({"text": "Fill in here."}));
+    run(&mut s, "review.restrict", json!({"exception": "add"}));
+    run(&mut s, "review.restrict", json!({"mode": "readOnly"}));
+    // Collected inside the exception: allowed.
+    run(&mut s, "select.text", json!({"text": "here"}));
+    run(&mut s, "edit.spike", json!({}));
+    assert_eq!(spiked(&s).as_deref(), Some("here\n"));
+    // Outside it: refused, and neither the document nor the Spike changes.
+    let before = text(&s);
+    run(&mut s, "select.text", json!({"text": "intro"}));
+    assert!(s.run("edit.spike", &json!({})).is_err());
+    assert_eq!(text(&s), before);
+    assert_eq!(spiked(&s).as_deref(), Some("here\n"));
+    // Inserting outside it: refused, and the Spike keeps what it holds.
+    assert!(s.run("edit.insertSpike", &json!({})).is_err());
+    assert_eq!(text(&s), before);
+    assert_eq!(spiked(&s).as_deref(), Some("here\n"));
+}
+
 #[test]
 fn clipboard_pane_is_capped_and_rejects_bad_indexes() {
     let mut s = s();
@@ -1933,6 +2034,20 @@ fn layout_size_refuses_a_page_its_margins_dont_fit() {
     }
     run(&mut s, "layout.size", json!({"width": 180.0, "height": 180.0}));
     assert_eq!((s.doc.last_section.page_w, s.doc.last_section.page_h), (180.0, 180.0), "exactly 36 pt of room is enough");
+}
+
+/// A negative margin (or gutter) counts as zero, so it can't offset an oversized one past the
+/// text-room check: `layout.margins` refuses and changes nothing.
+#[test]
+fn layout_margins_negative_cannot_hide_an_oversized_margin() {
+    let mut s = s();
+    run(&mut s, "layout.margins", json!({"preset": "normal"}));
+    let before = s.doc.last_section.clone();
+    for v in [json!({"top": 2000, "bottom": -2000}), json!({"left": 2000, "right": -2000}), json!({"left": 600, "right": 0, "gutter": -600})] {
+        let e = s.run("layout.margins", &v).unwrap_err().to_string();
+        assert!(e.contains("margins leave no room for text"), "{v}: {e}");
+        assert_eq!(s.doc.last_section, before, "{v} changes nothing");
+    }
 }
 
 /// #1433: the smallest page there can be (0.1" wide, no margins, set straight through Page
@@ -2571,6 +2686,85 @@ fn imported_range_toc_is_refreshed_in_place() {
     }
 }
 
+/// #2182 (the save and reopen gap, not the flow in the report, which #1197 fixed): after a save
+/// and reopen a TOC is a range field opening in its first entry. The context menu offers Update
+/// Field wherever the caret is in it, including the field's own marker (offset 0 of the first
+/// entry) and the end of the last entry; and repeated update, save and reopen adds no blank line.
+#[test]
+fn toc_menu_offers_update_field_after_save_and_reopen() {
+    use wordcraft_doc::para::InlineObject;
+    use wordcraft_doc::props::CharProps;
+    // What the canvas context menu checks before offering Update Field.
+    let offered = |s: &Session| !crate::cmd::fields::selected(s).is_empty() || crate::cmd::references::caret_in_toc(s);
+    let mut d = wordcraft_doc::Document::from_text("Before.\nOld entry\t9\nAlpha\nBeta");
+    {
+        let p = d.para_mut(StoryRef::Body, &wordcraft_doc::Path::top(1)).unwrap();
+        let n = p.len();
+        p.insert_object(n, InlineObject::FieldEnd, &CharProps::default()).unwrap();
+        p.insert_object(0, InlineObject::FieldStart { instr: r#"TOC \o "1-2" \h"#.into(), locked: false, dirty: false }, &CharProps::default())
+            .unwrap();
+    }
+    let mut s = Session::new(d);
+    for (i, style) in [(2, "Heading 1"), (3, "Heading 2")] {
+        run(&mut s, "caret.set", json!({"pos": Pos::body(i, 0)}));
+        run(&mut s, "styles.apply", json!({"style": style}));
+    }
+    let check = |s: &mut Session, what: &str| {
+        let entries: Vec<usize> = (0..s.doc.body.len())
+            .filter(|i| {
+                s.doc.body.get(*i).and_then(|b| b.as_para()).is_some_and(|p| p.props.style.as_deref().is_some_and(|st| st.starts_with("TOC")))
+            })
+            .collect();
+        assert!(!entries.is_empty(), "{what}: no TOC paragraphs: {}", text(s));
+        for (k, i) in entries.iter().enumerate() {
+            let len = s.doc.body.get(*i).and_then(|b| b.as_para()).map_or(0, |p| p.len());
+            // The leftover empty field paragraph before the range (first block) has no menu (minor).
+            if k == 0 && len == 0 {
+                continue;
+            }
+            for off in 0..=len {
+                s.sel = crate::Selection::caret(Pos::body(*i, off));
+                assert!(offered(s), "{what}: no Update Field at block {i} offset {off}: {}", text(s));
+            }
+        }
+    };
+    let bytes = wordcraft_docx::write(&s.doc).unwrap();
+    s = Session::new(wordcraft_docx::read(&bytes).unwrap());
+    let mut blocks = None;
+    for round in 0..3 {
+        run(&mut s, "references.updateToc", json!({}));
+        check(&mut s, &format!("after update {round}"));
+        // No extra blank line per cycle.
+        assert!(blocks.is_none_or(|n| n == s.doc.body.len()), "after update {round}: the document grew: {}", text(&s));
+        blocks = Some(s.doc.body.len());
+        let bytes = wordcraft_docx::write(&s.doc).unwrap();
+        s = Session::new(wordcraft_docx::read(&bytes).unwrap());
+        check(&mut s, &format!("after reopen {round}"));
+    }
+}
+
+/// #2182: with two TOCs only the one Update Table would refresh is offered Update Field; the other
+/// range TOC doesn't claim the menu, so it never refreshes a different table.
+#[test]
+fn toc_menu_targets_the_toc_update_table_refreshes() {
+    use wordcraft_doc::para::InlineObject;
+    use wordcraft_doc::props::CharProps;
+    let mut d = wordcraft_doc::Document::from_text("One\nTwo\nHead\nFirst\nSecond\nTail");
+    for (para, instr) in [(0, r#"TOC \o "1-2""#), (3, r#"TOC \o "1-3""#)] {
+        let p = d.para_mut(StoryRef::Body, &wordcraft_doc::Path::top(para)).unwrap();
+        let n = p.len();
+        p.insert_object(n, InlineObject::FieldEnd, &CharProps::default()).unwrap();
+        p.insert_object(0, InlineObject::FieldStart { instr: instr.into(), locked: false, dirty: false }, &CharProps::default()).unwrap();
+    }
+    let mut s = Session::new(d);
+    let at = |s: &mut Session, block: usize| {
+        s.sel = crate::Selection::caret(Pos::body(block, 1));
+        crate::cmd::references::caret_in_toc(s)
+    };
+    assert!(at(&mut s, 0), "the first TOC is the one Update Table converts");
+    assert!(!at(&mut s, 3), "the second range TOC is not offered the menu item");
+}
+
 /// Updating a TOC field that had a non-empty result (placeholder from an external generator, #878)
 /// clears the old result so the exported DOCX nests entries inside the field rather than leaving
 /// them after the field's end marker.
@@ -3075,6 +3269,17 @@ fn word_count_includes_numbered_list_labels_in_words_but_not_characters() {
     // so Word excludes it from character counts: "Apple" has 5 characters.
     assert_eq!(v["characters"].as_u64(), Some(5));
     assert_eq!(v["charactersWithSpaces"].as_u64(), Some(5));
+}
+
+#[test]
+fn word_count_excludes_carriage_returns_from_character_counts() {
+    let mut s = s();
+    run(&mut s, "text.insert", json!({"text": "Hello\r\nWorld"}));
+    run(&mut s, "select.all", json!({}));
+    let v = run(&mut s, "review.wordCount", json!({}));
+    assert_eq!(v["words"].as_u64(), Some(2));
+    assert_eq!(v["characters"].as_u64(), Some(10));
+    assert_eq!(v["charactersWithSpaces"].as_u64(), Some(10));
 }
 
 /// The laid-out area of the only text box.
@@ -4276,6 +4481,26 @@ fn navigation_pane_opens_without_changing_view_mode() {
         run(&mut s, "view.navigationPane", json!({"value": true}));
         assert!(s.view.nav_pane);
         assert_eq!((s.view.mode, s.view.read_mode), before, "{command}");
+    }
+}
+
+#[test]
+fn interface_theme_queues_a_front_end_request_and_rejects_junk() {
+    // #1861: the session can't paint, so the command asks the front end; the document,
+    // view state and undo stack are untouched.
+    let mut s = s();
+    let dirty = s.dirty;
+    for value in ["light", "dark", "system"] {
+        let r = run(&mut s, "view.interfaceTheme", json!({"value": value}));
+        assert_eq!(r["value"], value);
+        assert_eq!(s.ui_requests.last().unwrap()["interfaceTheme"], value);
+    }
+    let r = run(&mut s, "view.interfaceTheme", json!({}));
+    assert_eq!(r["value"], "toggle");
+    assert_eq!(s.ui_requests.last().unwrap()["toggle"], "interfaceTheme");
+    assert_eq!(s.dirty, dirty);
+    for bad in [json!({"value": "midnight"}), json!({"value": 3})] {
+        assert!(s.run("view.interfaceTheme", &bad).is_err(), "{bad}");
     }
 }
 
@@ -5920,6 +6145,26 @@ fn note_options_per_section_and_convert_notes() {
     assert!(s.run("references.convertNotes", &json!({"to": "sideways"})).is_err());
 }
 
+#[test]
+fn next_footnote_skips_endnotes() {
+    let mut s = s();
+    run(&mut s, "text.insert", json!({"text": "A"}));
+    run(&mut s, "references.footnote", json!({"text": "Fn1"}));
+    s.sel = crate::Selection::caret(s.doc.end_of(StoryRef::Body));
+    run(&mut s, "text.insert", json!({"text": "B"}));
+    run(&mut s, "references.endnote", json!({"text": "En1"}));
+    s.sel = crate::Selection::caret(s.doc.end_of(StoryRef::Body));
+    run(&mut s, "text.insert", json!({"text": "C"}));
+    run(&mut s, "references.footnote", json!({"text": "Fn2"}));
+
+    s.sel = crate::Selection::caret(Pos::body(0, 0));
+    run(&mut s, "references.nextFootnote", json!({}));
+    assert_eq!(s.sel.focus.off, 1);
+
+    run(&mut s, "references.nextFootnote", json!({}));
+    assert_eq!(s.sel.focus.off, 9);
+}
+
 /// A tiny synthetic Polish Hunspell dictionary (written for these tests). Real dictionaries are
 /// installed on the system, never bundled; every Polish test installs this same one.
 fn polish_test_dictionary() {
@@ -6766,6 +7011,10 @@ fn ordinals_and_untagged_text_sort_and_sum_as_numbers() {
     let mut t = column_table("pl-PL", &["10.", "2.", "1."]);
     run(&mut t, "table.sort", json!({"column": 0, "header": false}));
     assert_eq!(column_texts(&t), ["1.", "2.", "10."]);
+
+    let mut t = column_table("en-US", &["10", "(50)", "20"]);
+    run(&mut t, "table.sort", json!({"column": 0, "header": false}));
+    assert_eq!(column_texts(&t), ["(50)", "10", "20"]);
 
     let mut s = s();
     s.set_editing_language(Some("pl-PL"));
@@ -7841,4 +8090,136 @@ fn quick_parts_use_the_documents_building_blocks() {
     assert_eq!(s.doc.glossary.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["Signature", "Disclaimer"]);
     assert!(s.run("insert.quickParts", &json!({"save": " ", "in": "document"})).is_err());
     assert!(s.run("insert.quickParts", &json!({"insert": "Closing"})).is_err());
+}
+
+#[test]
+fn toc_collects_cell_headings() {
+    use std::sync::Arc;
+    use wordcraft_doc::{Block, CharProps, InlineObject, Paragraph, Path, Table, para_block};
+    let mut earlier = Table::new(1, 1, 180.0);
+    earlier.rows[0].cells[0].blocks = vec![para_block(Paragraph::with_text("Earlier", CharProps::default()).styled("Heading1"))];
+    let mut nested = Table::new(1, 1, 180.0);
+    nested.rows[0].cells[0].blocks = vec![para_block(Paragraph::with_text("Nested", CharProps::default()).styled("Heading3"))];
+    let mut later = Paragraph::with_text("Later", CharProps::default());
+    later.props.outline_level = Some(1);
+    let mut table = Table::new(1, 1, 180.0);
+    table.rows[0].cells[0].blocks =
+        vec![para_block(later), Arc::new(Block::Table(nested)), para_block(Paragraph::with_text("Unlisted", CharProps::default()))];
+    let mut toc = Paragraph::with_text("Contents", CharProps::default()).styled("TOCHeading");
+    toc.insert_object(
+        toc.len(),
+        InlineObject::Field {
+            instr: r#"TOC \o "1-3" \h \u"#.into(),
+            result: String::new(),
+            locked: false,
+            dirty: true,
+            code: false,
+            form: String::new(),
+        },
+        &CharProps::default(),
+    )
+    .unwrap();
+    let mut d = wordcraft_doc::Document::new();
+    d.body = vec![
+        Arc::new(Block::Table(earlier)),
+        para_block(toc),
+        para_block(Paragraph::with_text("\u{000C}", CharProps::default())),
+        Arc::new(Block::Table(table)),
+    ];
+    let mut s = Session::new(wordcraft_docx::read(&wordcraft_docx::write(&d).unwrap()).unwrap());
+    for command in ["references.updateFields", "references.updateToc"] {
+        run(&mut s, command, json!({}));
+        let entries: Vec<_> = s
+            .doc
+            .body
+            .iter()
+            .filter_map(|b| b.as_para())
+            .filter(|p| p.props.style.as_deref().is_some_and(|st| st.starts_with("TOC") && st != "TOCHeading"))
+            .cloned()
+            .collect();
+        assert_eq!(entries.len(), 3, "{command}: {}", text(&s));
+        let layout = s.layout();
+        let bookmarks = s.doc.bookmarks();
+        let mut pages = Vec::new();
+        for (p, title) in entries.iter().zip(["Earlier", "Later", "Nested"]) {
+            let value = p.plain_text();
+            assert!(value.starts_with(title), "{value}");
+            let shown: u32 = value.rsplit_once('\t').unwrap().1.parse().unwrap();
+            let name = p.props_of_char(0).link.as_ref().unwrap().strip_prefix('#').unwrap();
+            let (_, target) = bookmarks.iter().find(|(n, _)| n == name).unwrap();
+            assert!(target.path.depth() > 0);
+            let paragraph = s.doc.para(StoryRef::Body, &target.path).unwrap();
+            assert_eq!(paragraph.plain_text(), title);
+            let caret = layout.caret(target).unwrap();
+            assert_eq!(shown, layout.pages[caret.page].number, "{title}");
+            pages.push(caret.page);
+        }
+        assert!(pages[1] > pages[0]);
+        assert_eq!(bookmarks.iter().filter(|(n, _)| n.starts_with("_Toc")).count(), 3);
+        // The block-index-only link API must not misidentify a cell paragraph as a body block.
+        let targets = s.run("link.targets", &json!({})).unwrap();
+        assert_eq!(targets["headings"].as_array().unwrap().len(), 0);
+        assert!(s.doc.para(StoryRef::Body, &Path::top(1)).is_some());
+    }
+}
+
+#[test]
+fn toc_keeps_direct_number_tabs() {
+    use wordcraft_doc::props::{CharProps, NumRef, TabAlign, TabLeader, TabStop};
+    let left = TabStop { pos: 24.0, align: TabAlign::Left, leader: TabLeader::None };
+    let right = TabStop { pos: 179.5, align: TabAlign::Right, leader: TabLeader::Dot };
+    let mut d = wordcraft_doc::Document::from_text("Contents\n\n1.\tAlpha\t9\nAlpha\nBeta");
+    d.last_section.page_w = 220.0;
+    d.last_section.margin_left = 20.0;
+    d.last_section.margin_right = 20.0;
+    d.styles.get_mut("TOC2").unwrap().para.tabs = Some(vec![right]);
+    let num = d.numbering.add_list(wordcraft_doc::ListKind::Numbered);
+    {
+        let p = d.para_mut(StoryRef::Body, &wordcraft_doc::Path::top(0)).unwrap();
+        p.props.style = Some("TOCHeading".into());
+        p.insert_object(
+            p.len(),
+            wordcraft_doc::InlineObject::Field {
+                instr: r#"TOC \o "1-2""#.into(),
+                result: String::new(),
+                locked: false,
+                dirty: true,
+                code: false,
+                form: String::new(),
+            },
+            &CharProps::default(),
+        )
+        .unwrap();
+        let p = d.para_mut(StoryRef::Body, &wordcraft_doc::Path::top(1)).unwrap();
+        p.props.style = Some("TOC2".into());
+        p.props.tabs = Some(vec![right]);
+        let p = d.para_mut(StoryRef::Body, &wordcraft_doc::Path::top(2)).unwrap();
+        p.props.style = Some("TOC2".into());
+        p.props.tabs = Some(vec![left, right]);
+    }
+    for i in [3, 4] {
+        let p = d.para_mut(StoryRef::Body, &wordcraft_doc::Path::top(i)).unwrap();
+        p.props.style = Some("Heading2".into());
+        p.props.numbering = Some(NumRef { num, level: 0 });
+    }
+    let bytes = wordcraft_docx::write(&d).unwrap();
+    let mut s = Session::new(wordcraft_docx::read(&bytes).unwrap());
+    for command in ["references.updateFields", "references.updateToc", "references.toc"] {
+        run(&mut s, command, json!({}));
+        let layout = s.layout();
+        let mut entries = 0;
+        for (i, b) in s.doc.body.iter().enumerate() {
+            let Some(p) = b.as_para().filter(|p| p.props.style.as_deref() == Some("TOC2")) else { continue };
+            entries += 1;
+            assert!(p.props.tabs.as_ref().is_some_and(|tabs| tabs.contains(&left)), "{command}: {:?}", p.props.tabs);
+            let title = p.text.find('\t').unwrap() + 1;
+            let page = p.text.rfind('\t').unwrap() + 1;
+            let start = layout.caret(&Pos::body(i, title)).unwrap();
+            let end = layout.caret(&Pos::body(i, page)).unwrap();
+            assert_eq!((start.page, start.top), (end.page, end.top), "{command}: {:?}", p.plain_text());
+            assert!((start.x - 44.0).abs() < 1.0, "{command}: {}", start.x);
+            assert!(end.x > 180.0, "{command}: {}", end.x);
+        }
+        assert_eq!(entries, 2);
+    }
 }
