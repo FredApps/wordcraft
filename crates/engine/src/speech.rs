@@ -256,7 +256,7 @@ fn primary_tag(tag: &str) -> Option<String> {
 
 /// The language to ask the speech program for, or `None` to keep its default voice: only when
 /// `lang` isn't the language the default voice speaks (`default`, a primary subtag) already.
-#[cfg(any(not(target_os = "windows"), test))]
+#[cfg(any(all(not(target_os = "windows"), not(target_arch = "wasm32")), test))]
 fn voice_language(lang: Option<&str>, default: &str) -> Option<String> {
     lang.and_then(primary_tag).filter(|p| !p.eq_ignore_ascii_case(default))
 }
@@ -365,6 +365,8 @@ fn mac_default_voice_language() -> &'static str {
 
 #[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
 mod ssip;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 /// Longest voice id kept (ids come from saved settings and commands, hostile input).
 const MAX_VOICE_ID: usize = 200;
@@ -380,6 +382,8 @@ pub enum VoiceKind {
     Mac,
     /// The Windows speech synthesizer: the id is the voice name.
     Windows,
+    /// The browser's speech synthesis: the id is the voice URI.
+    Web,
 }
 
 /// An installed voice Read Aloud can read in.
@@ -403,7 +407,6 @@ impl Voice {
 /// The chosen voice, when it suits the sentence: the sentence has no language, or the voice's
 /// language is the sentence's (the primary subtags match). A sentence in another language keeps
 /// the voice of its language, so a Hungarian voice doesn't read a Russian quotation.
-#[cfg(any(not(target_arch = "wasm32"), test))]
 fn voice_for<'a>(voice: Option<&'a Voice>, lang: Option<&str>) -> Option<&'a Voice> {
     let voice = voice?;
     let Some(sentence) = lang.and_then(primary_tag) else { return Some(voice) };
@@ -530,7 +533,18 @@ pub fn installed_voices() -> Option<&'static [Voice]> {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        Some(&[])
+        // Browsers load their voices after the page; until they arrive (or a while has passed
+        // without any), the list is pending.
+        static WEB_VOICES: std::sync::OnceLock<Vec<Voice>> = std::sync::OnceLock::new();
+        static ASKED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if let Some(v) = WEB_VOICES.get() {
+            return Some(v);
+        }
+        let list = web::voices();
+        if list.is_empty() && ASKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 50 {
+            return None;
+        }
+        Some(WEB_VOICES.get_or_init(|| list))
     }
 }
 
@@ -870,13 +884,12 @@ impl ReadAloud {
         })
     }
 
+    /// In the browser there is no worker thread: the browser's speech synthesis speaks the
+    /// current sentence, and its end event moves on ([`web`]).
     #[cfg(target_arch = "wasm32")]
     fn ensure_worker(&mut self) {
-        let (m, _) = &*self.shared;
-        let mut s = lock(m);
-        if s.state == State::Playing && self.backend == Backend::System {
-            s.state = State::Stopped;
-            s.error = Some("Read Aloud isn't available in the browser".into());
+        if self.backend == Backend::System {
+            web::sync(&self.shared);
         }
     }
 
@@ -899,11 +912,17 @@ impl ReadAloud {
 
 impl Drop for ReadAloud {
     fn drop(&mut self) {
-        let (m, cv) = &*self.shared;
-        let mut s = lock(m);
-        s.state = State::Stopped;
-        s.generation = s.generation.wrapping_add(1);
-        cv.notify_all();
+        {
+            let (m, cv) = &*self.shared;
+            let mut s = lock(m);
+            s.state = State::Stopped;
+            s.generation = s.generation.wrapping_add(1);
+            cv.notify_all();
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self.backend == Backend::System {
+            web::cancel();
+        }
     }
 }
 
