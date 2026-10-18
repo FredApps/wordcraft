@@ -61,6 +61,18 @@ pub fn specs() -> Vec<CommandSpec> {
         .pure(),
         CommandSpec::new("edit.cut", "Cut", "Home › Clipboard", cut).key("Mod+X").when(has_sel),
         CommandSpec::new("edit.copy", "Copy", "Home › Clipboard", copy).key("Mod+C / Mod+Insert").pure(),
+        // Word's Spike (Ctrl+F3, Ctrl+Shift+F3; ⌘ on the Mac): the AutoText entry "Spike", so Quick
+        // Parts and AutoText insert it without emptying it, as in Word.
+        CommandSpec::new("edit.spike", "Spike", "Editing", spike).key("Mod+F3").when(has_sel),
+        CommandSpec::new("edit.insertSpike", "Insert Spike", "Editing", insert_spike).key("Mod+Shift+F3").when(|s| {
+            if s.math.is_some() {
+                Some("leave the equation first")
+            } else if s.building_blocks.contains_key(SPIKE) {
+                None
+            } else {
+                Some("the Spike is empty")
+            }
+        }),
         CommandSpec::new("edit.paste", "Paste", "Home › Clipboard", paste).key("Mod+V / Shift+Insert").params(r#"{"text"?: string, "html"?: string, "rtf"?: string}"#),
         CommandSpec::new("edit.pasteText", "Paste: Keep Text Only", "Home › Clipboard › Paste", paste_text)
             .params(r#"{"text"?: string}"#)
@@ -198,11 +210,42 @@ fn cut(s: &mut Session, v: &Value) -> CmdResult {
     Ok(r)
 }
 
-/// Paste keeps the source formatting: our own copy while the system clipboard still holds it,
-/// else another program's HTML or RTF (#687), else the system clipboard's text.
-fn paste(s: &mut Session, v: &Value) -> CmdResult {
-    let frag = super::paste::paste_fragment(s, v)?;
+/// The AutoText entry the Spike collects into.
+const SPIKE: &str = "Spike";
+
+/// Ctrl+F3: cut the selection to the end of the Spike. The clipboard is left alone.
+fn spike(s: &mut Session, _: &Value) -> CmdResult {
+    let (a, b) = s.sel.ordered();
+    // Column selection collapses the selection before the command runs.
+    if a == b {
+        return Err(CmdError::Disabled("edit.spike: nothing is selected".into()));
+    }
+    let piece = s.doc.copy_range(&a, &b);
+    if piece.blocks.is_empty() {
+        return Err(CmdError::Disabled("edit.spike: this selection can't be collected".into()));
+    }
+    delete_selection(s)?;
+    super::controls::restore_placeholder(s)?;
+    s.building_blocks.entry(SPIKE.to_string()).or_default().append_piece(piece);
+    sel_result(s)
+}
+
+/// Ctrl+Shift+F3: insert everything the Spike collected, in order, and empty it.
+fn insert_spike(s: &mut Session, _: &Value) -> CmdResult {
+    let frag = s.building_blocks.get(SPIKE).cloned().ok_or_else(|| CmdError::Disabled("edit.insertSpike: the Spike is empty".into()))?;
     super::paste::insert(s, frag)?;
+    s.building_blocks.remove(SPIKE);
+    sel_result(s)
+}
+
+/// Paste keeps the source formatting: our own copy while the system clipboard still holds it,
+/// else another program's HTML or RTF (#687). The system clipboard's text has none, so it pastes
+/// as Keep Text Only does.
+fn paste(s: &mut Session, v: &Value) -> CmdResult {
+    match super::paste::paste_content(s, v)? {
+        super::paste::Pasted::Fragment(frag) => super::paste::insert(s, frag)?,
+        super::paste::Pasted::Text(text) => super::paste::insert_text(s, &text)?,
+    }
     sel_result(s)
 }
 
@@ -656,7 +699,8 @@ fn replace_all(s: &mut Session, v: &Value) -> CmdResult {
             super::paste_text(s, &with)?;
             continue;
         }
-        let props = s.doc.para_at(&a).map(|p| p.props_of_char(a.off).clone()).unwrap_or_default();
+        // Replacing a symbol gives the new text the symbol's formatting, not its own font.
+        let props = s.doc.para_at(&a).map(|p| p.props_of_char(a.off).clone().without_symbol()).unwrap_or_default();
         let mut at = s.doc.delete_range(&a, &b)?;
         for (k, part) in with.split(['\r', '\u{2029}']).enumerate() {
             if k > 0 {
@@ -720,7 +764,8 @@ fn goto(s: &mut Session, v: &Value) -> CmdResult {
 
 fn painter_pick(s: &mut Session) {
     let f = s.sel.ordered().0;
-    let chr = s.doc.para_at(&f).map(|p| p.props_of_char(f.off).clone()).unwrap_or_default();
+    // A symbol's own font isn't formatting to paint onto text.
+    let chr = s.doc.para_at(&f).map(|p| p.props_of_char(f.off).clone().without_symbol()).unwrap_or_default();
     let para = s.doc.para_at(&f).map(|p| p.props.clone()).unwrap_or_default();
     s.painter = Some((chr, para, false));
 }

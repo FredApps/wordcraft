@@ -169,6 +169,9 @@ pub struct DisplayOptions {
     pub hide_ink: bool,
     /// How tracked changes and comments are marked when `markup` is on (Track Changes Options).
     pub revisions: MarkupOptions,
+    /// Leave this object out of the page: while it is dragged, the preview under the pointer
+    /// stands in for it, so the page must not also show it where it was.
+    pub hide_object: Option<wordcraft_doc::Pos>,
 }
 
 impl Default for DisplayOptions {
@@ -182,6 +185,39 @@ impl Default for DisplayOptions {
             placeholders: false,
             hide_ink: false,
             revisions: MarkupOptions::default(),
+            hide_object: None,
+        }
+    }
+}
+
+/// An object left out of a page's drawing ([`DisplayOptions::hide_object`]).
+struct Hidden {
+    object: wordcraft_doc::Pos,
+    /// The text box stories it shows (its own and its group members', resolved to the story each
+    /// one shows): a box's text is drawn as lines of its story, so it goes with the box.
+    boxes: Vec<u32>,
+}
+
+impl Hidden {
+    /// The object at `object` and the text box stories whose lines belong to it.
+    fn new(doc: &Document, object: &wordcraft_doc::Pos) -> Hidden {
+        let boxes = doc
+            .para(object.story, &object.path)
+            .and_then(|p| p.object_at(object.off))
+            .map(|o| o.text_boxes().into_iter().map(|id| doc.text_box_chain(id).and_then(|c| c.first().copied()).unwrap_or(id)).collect())
+            .unwrap_or_default();
+        Hidden { object: object.clone(), boxes }
+    }
+
+    fn hides(&self, it: &Placed) -> bool {
+        let me = &self.object;
+        match it {
+            Placed::Object { story, path, off, .. } | Placed::Image { story, path, off, .. } | Placed::Graphic { story, path, off, .. } => {
+                *story == me.story && *path == me.path && *off == me.off
+            }
+            Placed::Shape { object: Some(pos), .. } => pos == me,
+            Placed::Lines { story: StoryRef::Part(id), .. } => self.boxes.contains(id),
+            _ => false,
         }
     }
 }
@@ -231,6 +267,11 @@ named! {
         Hash = "hash",
         Underline = "underline",
         ColorOnly = "colorOnly",
+        /// No mark (an ordinary deletion keeps its colour; moved-away text is plain, as in Word).
+        None = "none",
+        Bold = "bold",
+        Italic = "italic",
+        DoubleUnderline = "doubleUnderline",
     }
 }
 
@@ -294,6 +335,14 @@ pub struct MarkupOptions {
     pub changed_lines_color: Option<Rgb>,
     /// Record formatting changes while tracking.
     pub track_formatting: bool,
+    /// How the place moved text was taken from is marked (Moves › Moved from).
+    pub move_from_mark: DeleteMark,
+    /// `None` = by author.
+    pub move_from_color: Option<Rgb>,
+    /// How moved text is marked where it went (Moves › Moved to).
+    pub move_to_mark: InsertMark,
+    /// `None` = by author.
+    pub move_to_color: Option<Rgb>,
 }
 
 impl Default for MarkupOptions {
@@ -312,14 +361,28 @@ impl Default for MarkupOptions {
             changed_lines: ChangeBar::default(),
             changed_lines_color: None,
             track_formatting: true,
+            move_from_mark: DeleteMark::DoubleStrikethrough,
+            move_from_color: Some(MOVE_COLOR),
+            move_to_mark: InsertMark::DoubleUnderline,
+            move_to_color: Some(MOVE_COLOR),
         }
     }
 }
 
 impl MarkupOptions {
-    /// Tracked deletions take no room: they are hidden, or insertions and deletions aren't shown.
-    pub fn hides_deletions(&self) -> bool {
-        !self.insertions_deletions || self.delete_mark == DeleteMark::Hidden
+    /// Whether a tracked deletion takes no room with markup shown: insertions and deletions
+    /// aren't shown, or its mark is Hidden. Text a move took away (`moved_from`) follows Moved
+    /// from, other deletions follow Deletions, so Deletions = Hidden leaves moved-away text shown
+    /// (Word for Mac's behaviour for that combination is unverified: this is the one place to
+    /// change it).
+    pub fn hides_deletion(&self, moved_from: bool) -> bool {
+        let mark = if moved_from { self.move_from_mark } else { self.delete_mark };
+        !self.insertions_deletions || mark == DeleteMark::Hidden
+    }
+
+    /// The deletions the layout leaves out with markup shown ([`crate::LayoutOptions::hide_marked`]).
+    pub fn hidden_deletions(&self) -> crate::HideDeleted {
+        crate::HideDeleted { plain: self.hides_deletion(false), moved_from: self.hides_deletion(true) }
     }
 }
 
@@ -346,6 +409,7 @@ fn stroke_of(u: Underline) -> Stroke {
 /// Draw items for a page.
 pub fn page_display(doc: &Document, page: &Page, opts: &DisplayOptions) -> Vec<Draw> {
     let mut out = Vec::new();
+    let hidden = opts.hide_object.as_ref().map(|p| Hidden::new(doc, p));
     let ha = if opts.dim_header { 0.45 } else { 1.0 };
     let ba = if opts.dim_body { 0.45 } else { 1.0 };
     for (items, a) in [(&page.header, ha), (&page.footer, ha), (&page.items, ba)] {
@@ -353,6 +417,10 @@ pub fn page_display(doc: &Document, page: &Page, opts: &DisplayOptions) -> Vec<D
         let clips = clipped_cells(items);
         let mut done: Vec<u32> = Vec::new();
         for it in items.iter() {
+            // The object being dragged is drawn by its preview instead: leave it out here.
+            if hidden.as_ref().is_some_and(|h| h.hides(it)) {
+                continue;
+            }
             if let Placed::Lines { story, path, .. } = it
                 && let Some(rect) = cell_clip(&clips, *story, &path.0)
             {
@@ -584,7 +652,7 @@ fn item_in(doc: &Document, it: &Placed, opts: &DisplayOptions, alpha: f32, outer
         Placed::Image { rect, media, crop, spin, .. } => {
             spun(*spin, *rect, vec![Draw::Image { rect: *rect, media: media.clone(), crop: *crop, alpha, alt: String::new() }], out)
         }
-        Placed::Shape { rect, kind, fill, stroke, stroke_width, effects, freeform, spin, extra } => {
+        Placed::Shape { rect, kind, fill, stroke, stroke_width, effects, freeform, spin, extra, .. } => {
             let mut items = Vec::new();
             let fx = effects_in(*effects, spin.within(outer));
             shape_draws(*rect, *kind, *fill, *stroke, *stroke_width, fx, freeform.as_deref(), extra, opts, &mut items);
@@ -845,28 +913,32 @@ fn lines(
             let rc = &st.rc;
             let m = &opts.revisions;
             // Without markup a deletion is never drawn as ordinary text, even in a layout that
-            // kept it; nor when deletions are hidden.
-            if rc.del.is_some() && (!opts.markup || m.hides_deletions()) {
+            // kept it; nor when its mark is Hidden.
+            if rc.del.is_some() && (!opts.markup || m.hides_deletion(doc.move_name(rc.del).is_some())) {
                 continue;
             }
             let shown = opts.markup && m.insertions_deletions;
             let del = rc.del.filter(|_| shown);
             let ins = rc.ins.filter(|_| shown && del.is_none());
             let author = |r: u32| revision_color(doc.revisions.get(r as usize).map(|v| author_index(doc, &v.author)).unwrap_or(0));
-            // Moved text: green, double strikethrough where it was, double underline where it went.
+            // Moved text: the Moves marks and colours (by default green, double strikethrough
+            // where it was, double underline where it went).
             let moved_to = doc.move_name(ins).is_some();
             let moved_from = del.is_some() && doc.move_name(del).is_some();
+            // Moved text marked (none) is plain text, its colour setting aside (Word for Mac).
+            let plain_move = (moved_from && m.move_from_mark == DeleteMark::None) || (moved_to && m.move_to_mark == InsertMark::None);
             let color = match (ins, del) {
-                (_, Some(_)) if moved_from => MOVE_COLOR,
-                (Some(_), _) if moved_to => MOVE_COLOR,
+                _ if plain_move => text_color(&rc.color, rc.shading.or(rc.highlight)),
+                (_, Some(r)) if moved_from => m.move_from_color.unwrap_or_else(|| author(r)),
+                (Some(r), _) if moved_to => m.move_to_color.unwrap_or_else(|| author(r)),
                 (Some(r), _) => m.insert_color.unwrap_or_else(|| author(r)),
                 (None, Some(r)) => m.delete_color.unwrap_or_else(|| author(r)),
                 _ => ink(&rc.color, rc.shading.or(rc.highlight)),
             };
             // The highlight or shading drawn under this run (as filled in the backgrounds pass).
             let text_bg = rc.highlight.or(rc.shading);
-            let ins_mark = ins.map(|_| if moved_to { InsertMark::DoubleUnderline } else { m.insert_mark });
-            let del_mark = del.map(|_| if moved_from { DeleteMark::DoubleStrikethrough } else { m.delete_mark });
+            let ins_mark = ins.map(|_| if moved_to { m.move_to_mark } else { m.insert_mark });
+            let del_mark = del.map(|_| if moved_from { m.move_from_mark } else { m.delete_mark });
             if del_mark == Some(DeleteMark::Caret) {
                 // A caret where the text was, instead of the text.
                 if let Some(cx) = line.cl_left(run_start).map(|c| x + c) {
@@ -904,8 +976,8 @@ fn lines(
                     g.0 = gid;
                 }
             }
-            let synth_bold = st.synth_bold || ins_mark == Some(InsertMark::Bold);
-            let synth_italic = st.synth_italic || ins_mark == Some(InsertMark::Italic);
+            let synth_bold = st.synth_bold || ins_mark == Some(InsertMark::Bold) || del_mark == Some(DeleteMark::Bold);
+            let synth_italic = st.synth_italic || ins_mark == Some(InsertMark::Italic) || del_mark == Some(DeleteMark::Italic);
             // Text effects draw the letters from their outlines; the glyphs stay, invisible, for
             // the PDF's text. Not for colour glyphs (no outlines), top-to-bottom text with upright
             // characters (their outlines would lie on their side), `#` deletion marks, or WordArt
@@ -953,7 +1025,7 @@ fn lines(
             let thick = (st.size / 18.0).max(0.5);
             let underline = match (ins_mark, del_mark) {
                 (Some(InsertMark::Underline), _) | (_, Some(DeleteMark::Underline)) => Underline::Single,
-                (Some(InsertMark::DoubleUnderline), _) => Underline::Double,
+                (Some(InsertMark::DoubleUnderline), _) | (_, Some(DeleteMark::DoubleUnderline)) => Underline::Double,
                 _ => rc.underline,
             };
             let double = rc.double_strike || del_mark == Some(DeleteMark::DoubleStrikethrough);
@@ -1048,6 +1120,10 @@ fn lines(
             if c.obj_h <= 0.0 {
                 continue;
             }
+            // A dragged inline object is left out too: its preview stands in for it.
+            if opts.hide_object.as_ref().is_some_and(|p| p.story == story && p.path == *path && p.off == c.start) {
+                continue;
+            }
             let cx = x + line.cl_left(k).unwrap_or(0.0);
             let obj = para.and_then(|p| p.objects.get(oi));
             let rect = inline_rect(obj, cx, base, c.adv, c.obj_h);
@@ -1064,6 +1140,13 @@ fn lines(
                 Some(InlineObject::Equation { .. }) => {
                     if let Some((_, ml)) = pl.maths.iter().find(|(k, _)| *k == oi) {
                         equation(&ml.items, cx, base, alpha, opts.placeholders, out);
+                    }
+                }
+                Some(o @ InlineObject::Field { .. }) => {
+                    if let Some(wordcraft_doc::legacy_form::LegacyForm::CheckBox { checked, .. }) = o.legacy_form() {
+                        let color = pl.styles.get(c.style as usize).map_or(Rgb::BLACK, |st| text_color(&st.rc.color, None));
+                        let frame = Rect::new(cx, base - c.obj_h, c.adv, c.obj_h + c.obj_d);
+                        check_box(frame, checked, color, alpha, out);
                     }
                 }
                 _ => {}
@@ -1154,7 +1237,10 @@ fn lines(
                     _ => {}
                 }
             }
-            if line.end == LineEnd::Para && marks.paragraphs {
+            // A deleted paragraph mark that isn't shown (no markup, or its mark is Hidden) draws no ¶.
+            let mark_gone =
+                para.is_some_and(|p| p.mark.del.is_some() && (!opts.markup || opts.revisions.hides_deletion(doc.move_name(p.mark.del).is_some())));
+            if line.end == LineEnd::Para && marks.paragraphs && !mark_gone {
                 // The mark follows the line's visual end, past every glyph, even where the
                 // logically last text runs against the paragraph's direction.
                 let ex = x + line.visual_end_x();
@@ -1163,8 +1249,10 @@ fn lines(
                 let mx = if line.rtl { ex - 1.0 - size * 0.6 } else { ex + 1.0 };
                 // A tracked (inserted or deleted) paragraph mark is drawn in its author's colour.
                 let m = &opts.revisions;
+                let by_author = |r: u32| revision_color(doc.revisions.get(r as usize).map(|v| author_index(doc, &v.author)).unwrap_or(0));
                 let color = para.filter(|_| opts.markup && m.insertions_deletions).and_then(|p| match (p.mark.ins, p.mark.del) {
-                    (ins, del) if doc.move_name(del).is_some() || (del.is_none() && doc.move_name(ins).is_some()) => Some(MOVE_COLOR),
+                    (_, Some(r)) if doc.move_name(Some(r)).is_some() => Some(m.move_from_color.unwrap_or_else(|| by_author(r))),
+                    (Some(r), None) if doc.move_name(Some(r)).is_some() => Some(m.move_to_color.unwrap_or_else(|| by_author(r))),
                     (_, Some(r)) => Some(
                         m.delete_color
                             .unwrap_or_else(|| revision_color(doc.revisions.get(r as usize).map(|v| author_index(doc, &v.author)).unwrap_or(0))),
@@ -1568,6 +1656,34 @@ fn author_index(doc: &Document, author: &str) -> u32 {
     seen.iter().position(|a| *a == author).unwrap_or(0) as u32
 }
 
+/// How far a legacy check box's square sits inside the room it takes on its line, on every side.
+pub const CHECK_BOX_INSET: f32 = 1.16;
+
+/// A legacy form check box (`FORMCHECKBOX`) in `frame`, the room it takes on its line (as wide
+/// as the text's line is tall): a square inset [`CHECK_BOX_INSET`] with a 0.72 pt border, and,
+/// checked, an X from corner to corner in 0.48 pt lines, in the text's colour. Measured on Word's
+/// PDF export: a 9.96 pt square for 10 pt Calibri, 22.08 pt for 20 pt.
+pub fn check_box(frame: Rect, checked: bool, color: Rgb, alpha: f32, out: &mut Vec<Draw>) {
+    let i = CHECK_BOX_INSET.min(frame.w / 4.0).min(frame.h / 4.0).max(0.0);
+    let sq = Rect::new(frame.x + i, frame.y + i, (frame.w - 2.0 * i).max(0.5), (frame.h - 2.0 * i).max(0.5));
+    let line =
+        |x0: f32, y0: f32, x1: f32, y1: f32, width: f32| Draw::Line { x0, y0, x1, y1, width, color, stroke: Stroke::Solid, alpha, text_bg: None };
+    let (l, t, r, b) = (sq.x, sq.y, sq.x + sq.w, sq.y + sq.h);
+    out.push(Draw::Shape {
+        rect: sq,
+        kind: ShapeKind::Rectangle,
+        fill: None,
+        stroke: Some(color),
+        stroke_width: 0.72,
+        effects: Default::default(),
+        corner: None,
+        dash: Vec::new(),
+    });
+    if checked {
+        out.extend([line(l, t, r, b, 0.48), line(r, t, l, b, 0.48)]);
+    }
+}
+
 /// Automatic colour is black, or white on a dark background.
 pub fn text_color(c: &TextColor, background: Option<Rgb>) -> Rgb {
     match c {
@@ -1620,6 +1736,25 @@ fn object_draws(o: &InlineObject, rect: Rect, outer: Spin, alpha: f32, opts: &Di
                 Some(c) => spun(own, rect, vec![canvas_background(rect, c), Draw::Clip { rect, items: members }], out),
                 None => spun(own, rect, members, out),
             }
+        }
+        // Native ink in a group (kept opaque): drawn as drawing-level ink is, from its pictures.
+        InlineObject::Graphic { graphic, .. } if graphic.kind == GraphicKind::Ink => {
+            let (sx, sy) = (scale_of(rect.w, graphic.w), scale_of(rect.h, graphic.h));
+            let items = graphic
+                .items
+                .iter()
+                .filter_map(|it| match it {
+                    GraphicItem::Image { rect: r, media } => Some(Draw::Image {
+                        rect: Rect::new(rect.x + r[0] * sx, rect.y + r[1] * sy, r[2] * sx, r[3] * sy),
+                        media: media.clone(),
+                        crop: [0.0; 4],
+                        alpha,
+                        alt: String::new(),
+                    }),
+                    _ => None,
+                })
+                .collect();
+            spun(own, rect, items, out)
         }
         _ => {}
     }

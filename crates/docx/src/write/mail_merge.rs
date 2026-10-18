@@ -16,6 +16,27 @@ pub(crate) fn keep_rels(rels: &Rels) -> Result<Vec<u8>, DocxError> {
     }
     let mut w = W::new();
     w.open("Relationships", &[("xmlns", "http://schemas.openxmlformats.org/package/2006/relationships")]);
+    // Budget escaped attributes before allocating the serialized relationship map.
+    let too_large = || DocxError::Limit("mail merge settings relationships exceed 1 MiB".into());
+    let mut remaining = MAX_EMBEDDED_XML.saturating_sub(w.s.len()).saturating_sub("</Relationships>".len());
+    for r in &rels.list {
+        remaining = remaining.checked_sub(br#"<Relationship Id="" Type="" Target=""/>"#.len()).ok_or_else(too_large)?;
+        if r.external {
+            remaining = remaining.checked_sub(br#" TargetMode="External""#.len()).ok_or_else(too_large)?;
+        }
+        for value in [&r.id, &r.kind, &r.target] {
+            for byte in value.bytes() {
+                let size = match byte {
+                    b'&' => 5,
+                    b'<' | b'>' | b'\t' => 4,
+                    b'"' | b'\'' => 6,
+                    b'\n' | b'\r' => 5,
+                    _ => 1,
+                };
+                remaining = remaining.checked_sub(size).ok_or_else(too_large)?;
+            }
+        }
+    }
     for r in &rels.list {
         let mut attrs = vec![("Id", r.id.as_str()), ("Type", r.kind.as_str()), ("Target", r.target.as_str())];
         if r.external {
@@ -100,4 +121,21 @@ pub(super) fn write(doc: &Document, out: &mut PartRels, embeds: &mut super::embe
     merge.attrs.push(("xmlns:w".into(), "http://schemas.openxmlformats.org/wordprocessingml/2006/main".into()));
     merge.attrs.push(("xmlns:r".into(), "http://schemas.openxmlformats.org/officeDocument/2006/relationships".into()));
     Ok(Some(merge.to_xml()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::Rel;
+
+    #[test]
+    fn relationship_byte_budget_accounts_for_escaped_attributes() {
+        let mut rels = Rels::default();
+        rels.list.push(Rel { id: "source&".into(), kind: "mailMergeSource".into(), target: "é<&>\"'\t\n\r".into(), external: true });
+        let size = keep_rels(&rels).unwrap().len();
+        rels.list[0].target.push_str(&"x".repeat(MAX_EMBEDDED_XML - size));
+        assert_eq!(keep_rels(&rels).unwrap().len(), MAX_EMBEDDED_XML, "the exact encoded byte budget remains usable");
+        rels.list[0].target.push('x');
+        assert!(matches!(keep_rels(&rels), Err(DocxError::Limit(_))), "one encoded byte over the budget is refused");
+    }
 }
