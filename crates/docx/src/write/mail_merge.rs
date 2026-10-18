@@ -69,12 +69,18 @@ pub(super) fn write(doc: &Document, out: &mut PartRels) -> Result<Option<String>
         if e.name.starts_with("?:") || e.attrs.iter().any(|(k, _)| k.starts_with("?:")) {
             return Err(DocxError::MailMerge("unrecognised namespace in mailMerge".into()));
         }
+        let source_type = match e.name.as_str() {
+            "w:dataSource" | "w:src" => Some("mailMergeSource"),
+            "w:headerSource" => Some("mailMergeHeaderSource"),
+            _ => None,
+        };
+        if source_type.is_some()
+            && (e.attrs.iter().filter(|(name, _)| name == "r:id").count() != 1 || e.attr("r:id").is_none_or(|id| id.trim().is_empty()))
+        {
+            return Err(DocxError::MailMerge("expected one nonempty source relationship ID".into()));
+        }
         for (name, id) in &mut e.attrs {
             if name != "r:id" {
-                continue;
-            }
-            if let Some(new) = ids.get(id) {
-                *id = new.clone();
                 continue;
             }
             let mut matches = rels.iter().flat_map(|r| r.els()).filter(|r| r.attr("Id") == Some(id.as_str()));
@@ -86,13 +92,18 @@ pub(super) fn write(doc: &Document, out: &mut PartRels) -> Result<Option<String>
             let target = rel.attr("Target").unwrap_or("");
             let external = rel.attr("TargetMode").is_some_and(|v| v.eq_ignore_ascii_case("External"));
             let source = ["mailMergeSource", "mailMergeHeaderSource"].iter().any(|suffix| {
-                kind == format!("http://schemas.openxmlformats.org/officeDocument/2006/relationships/{suffix}")
-                    || kind == format!("http://purl.oclc.org/ooxml/officeDocument/relationships/{suffix}")
+                source_type.is_none_or(|expected| expected == *suffix)
+                    && (kind == format!("http://schemas.openxmlformats.org/officeDocument/2006/relationships/{suffix}")
+                        || kind == format!("http://purl.oclc.org/ooxml/officeDocument/relationships/{suffix}"))
             });
             if !external || !source || target.trim().is_empty() {
                 return Err(DocxError::MailMerge(format!(
                     "unsupported or empty source relationship {id}; only external mail merge sources are preserved"
                 )));
+            }
+            if let Some(new) = ids.get(id) {
+                *id = new.clone();
+                continue;
             }
             let new = out.add(kind, target, true);
             ids.insert(id.clone(), new.clone());

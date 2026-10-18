@@ -223,3 +223,27 @@ fn oversized_mail_merge_relationships_keep_owned_settings() {
         }
     }
 }
+
+#[test]
+fn source_elements_require_ids_and_their_own_relationship_types() {
+    let valid = source_rels();
+    let cases = [
+        ("data source without ID", merge().replace("<w:dataSource r:id=\"rId1\"/>", "<w:dataSource/>"), valid.clone()),
+        ("ODSO source without ID", merge().replace("<w:src r:id=\"rId2\"/>", "<w:src/>"), valid.clone()),
+        ("header source without ID", merge().replace("<w:odso>", "<w:headerSource/><w:odso>"), valid.clone()),
+        ("data source with header type", merge(), valid.replacen("/mailMergeSource", "/mailMergeHeaderSource", 1)),
+        (
+            "ODSO source with header type",
+            merge(),
+            valid.replace(&format!("Id=\"rId2\" Type=\"{R}/mailMergeSource\""), &format!("Id=\"rId2\" Type=\"{R}/mailMergeHeaderSource\"")),
+        ),
+        ("header source with data type", merge().replace("<w:odso>", "<w:headerSource r:id=\"rId1\"/><w:odso>"), valid.clone()),
+        // ODSO is visited first: reusing its allocated ID must still validate the header's type.
+        ("header reuses ODSO source ID", merge().replace("<w:odso>", "<w:headerSource r:id=\"rId2\"/><w:odso>"), valid),
+    ];
+    for (case, settings, rels) in cases {
+        let doc = wordcraft_docx::read(&fixture(&settings, &rels)).unwrap();
+        let err = wordcraft_docx::write(&doc).expect_err(case);
+        assert!(err.to_string().contains("mail merge"), "{case}: {err}");
+    }
+}
