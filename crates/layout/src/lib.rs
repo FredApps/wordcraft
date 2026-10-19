@@ -915,8 +915,9 @@ impl Ctx<'_> {
             let h = match self.fitted.get(&key) {
                 Some(h) => *h,
                 None => {
+                    let fresh = self.measure_depth == 0 && !self.boxes.inside();
                     let h = textbox::fitted_height(self, *id, *w);
-                    if !self.measure_exhausted {
+                    if fresh || !self.measure_exhausted {
                         self.fitted.insert(key, h);
                         self.fitted_order.push(key);
                     }
