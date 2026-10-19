@@ -9497,3 +9497,113 @@ fn caret_height_ignores_line_spacing() {
         assert!((single - wide).abs() < 0.01, "{spacing:?}: single {single}, wide {wide}");
     }
 }
+
+#[test]
+fn split_frame_keeps_flow_bottom() {
+    use crate::table::{CellPart, RowLayout, split_row};
+    use wordcraft_doc::para::Wrap;
+    use wordcraft_doc::props::Rgb;
+    const CUT: f32 = 100.0;
+    const BOTTOM: f32 = 4.0;
+    const FLOW_BOTTOM: f32 = 20.0;
+    const FRAME_BOTTOM: f32 = 80.0;
+    let frame = Rect::new(5.0, 40.0, 20.0, FRAME_BOTTOM - 40.0);
+    let image = |y| Placed::Image {
+        rect: Rect::new(5.0, y, 20.0, 10.0),
+        media: "synthetic".into(),
+        crop: [0.1, 0.2, 0.3, 0.4],
+        story: StoryRef::Body,
+        path: Path::top(0),
+        off: 0,
+        spin: Default::default(),
+    };
+    for wrap in [Wrap::BehindText, Wrap::InFrontOfText, Wrap::Square, Wrap::Tight, Wrap::Through, Wrap::TopAndBottom, Wrap::Inline] {
+        for min_height in [0.0, 90.0] {
+            let rect = Rect::new(0.0, 0.0, 100.0, 200.0);
+            let border = Border { width: BOTTOM, style: BorderStyle::Single, ..Default::default() };
+            let items = vec![
+                image(FLOW_BOTTOM - 10.0),
+                image(150.0),
+                Placed::Object {
+                    rect: frame,
+                    spin: Default::default(),
+                    story: StoryRef::Body,
+                    path: Path::top(0),
+                    off: 0,
+                    text_box: None,
+                    wrap,
+                    origin: wordcraft_geom::Point::new(3.0, 35.0),
+                },
+                Placed::Fill { rect, color: Rgb(200, 0, 0) },
+                Placed::Cell { rect, covered: false, table: Path::top(0), row: 0, cell: 0, story: StoryRef::Body, clip: false },
+                Placed::Rule { x0: 0.0, y0: 200.0, x1: 100.0, y1: 200.0, border },
+                Placed::Rule { x0: 0.0, y0: 0.0, x1: 0.0, y1: 200.0, border },
+            ];
+            let row = RowLayout {
+                min_height,
+                height: 200.0,
+                bottom: BOTTOM,
+                cells: vec![CellPart { top: 2.0, items: 0..items.len(), end: Some(160.0) }],
+                items,
+            };
+            let (first, rest) = split_row(&row, CUT).unwrap();
+            let content_bottom = if wrap == Wrap::BehindText { FLOW_BOTTOM } else { FRAME_BOTTOM };
+            let expected = (content_bottom + BOTTOM).max(min_height);
+            assert!((first.height - expected).abs() < 0.01, "{wrap:?}, minimum {min_height}: {} vs {expected}", first.height);
+            let frames: Vec<_> = first
+                .items
+                .iter()
+                .chain(&rest.items)
+                .filter_map(|it| match it {
+                    Placed::Object { rect, origin, wrap: actual, .. } => Some((*rect, *origin, *actual)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(frames, vec![(frame, wordcraft_geom::Point::new(3.0, 35.0), wrap)], "frame geometry and identity survive once");
+            assert!(first.items.iter().any(|it| matches!(it, Placed::Object { .. })), "the fitting frame stays in the first fragment");
+            let cells: Vec<_> = first
+                .items
+                .iter()
+                .filter_map(|it| match it {
+                    Placed::Cell { rect, .. } => Some(*rect),
+                    _ => None,
+                })
+                .collect();
+            let fills: Vec<_> = first
+                .items
+                .iter()
+                .filter_map(|it| match it {
+                    Placed::Fill { rect, .. } => Some(*rect),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(cells, vec![Rect::new(0.0, 0.0, 100.0, expected)]);
+            assert_eq!(fills, cells, "shading exactly covers the retained cell");
+            assert_eq!(first.items.iter().filter(|it| matches!(it, Placed::Rule { .. })).count(), 2);
+            for item in &first.items {
+                match item {
+                    Placed::Cell { rect, clip, .. } => {
+                        assert!(!clip);
+                        assert!((rect.bottom() - expected).abs() < 0.01, "cell {rect:?}");
+                    }
+                    Placed::Fill { rect, .. } => assert!((rect.bottom() - expected).abs() < 0.01, "fill {rect:?}"),
+                    Placed::Rule { x0, y0, x1, y1, .. } if x0 != x1 => {
+                        assert!((*y0 - expected).abs() < 0.01 && (*y1 - expected).abs() < 0.01, "closing rule {item:?}");
+                    }
+                    _ => {}
+                }
+            }
+            let images = |part: &RowLayout| {
+                part.items
+                    .iter()
+                    .filter_map(|it| match it {
+                        Placed::Image { rect, crop, media, .. } => Some((*rect, *crop, media.clone())),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(images(&first), vec![(Rect::new(5.0, 10.0, 20.0, 10.0), [0.1, 0.2, 0.3, 0.4], String::from("synthetic"))]);
+            assert_eq!(images(&rest), vec![(Rect::new(5.0, 2.0, 20.0, 10.0), [0.1, 0.2, 0.3, 0.4], String::from("synthetic"))]);
+        }
+    }
+}
