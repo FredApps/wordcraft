@@ -41,6 +41,9 @@ pub struct ShapeExtra {
     /// The fill's transparency, percent (DrawingML's `a:alpha` is its opacity); 0 = opaque.
     #[serde(skip_serializing_if = "is_zero_f32")]
     pub fill_transparency: f32,
+    /// The outline dash pattern; absent in older saved documents means solid.
+    #[serde(skip_serializing_if = "crate::line_dash::LineDash::is_solid")]
+    pub dash: crate::line_dash::LineDash,
 }
 
 fn is_zero(v: &u32) -> bool {
