@@ -405,6 +405,7 @@ pub fn missing_dictionary(lang: Option<&str>) -> Option<&'static str> {
     match ProofLang::from_tag(lang) {
         ProofLang::Pl => dictionary_needed(ProofLang::Pl, pl::has_dictionary()),
         ProofLang::Pt => dictionary_needed(ProofLang::Pt, pt::has_dictionary()),
+        ProofLang::Fr | ProofLang::FrCa => dictionary_needed(ProofLang::Fr, fr::has_dictionary()),
         _ => None,
     }
 }
@@ -417,6 +418,7 @@ pub fn unreadable_dictionary(lang: Option<&str>) -> Option<(&'static str, std::p
     let (proof_lang, loaded) = match ProofLang::from_tag(lang) {
         ProofLang::Pl => (ProofLang::Pl, pl::has_dictionary()),
         ProofLang::Pt => (ProofLang::Pt, pt::has_dictionary()),
+        ProofLang::Fr | ProofLang::FrCa => (ProofLang::Fr, fr::has_dictionary()),
         _ => return None,
     };
     let name = dictionary_needed(proof_lang, false)?;
@@ -426,12 +428,13 @@ pub fn unreadable_dictionary(lang: Option<&str>) -> Option<(&'static str, std::p
     hunspell::load_error(name).map(|(file, reason)| (name, file, reason))
 }
 
-/// The Hunspell name `lang` needs when `installed` is false; only Polish and Portuguese use one.
+/// The Hunspell name `lang` needs when `installed` is false (for the status-bar hint).
 fn dictionary_needed(lang: ProofLang, installed: bool) -> Option<&'static str> {
     match lang {
         _ if installed => None,
         ProofLang::Pl => Some("pl_PL"),
         ProofLang::Pt => Some("pt_BR"),
+        ProofLang::Fr | ProofLang::FrCa => Some("fr_FR"),
         _ => None,
     }
 }
@@ -908,6 +911,10 @@ mod tests {
     fn missing_dictionary_is_named_only_for_hunspell_languages_without_one() {
         assert_eq!(dictionary_needed(ProofLang::Pl, false), Some("pl_PL"));
         assert_eq!(dictionary_needed(ProofLang::Pt, false), Some("pt_BR"));
+        assert_eq!(dictionary_needed(ProofLang::Fr, false), Some("fr_FR"));
+        assert_eq!(dictionary_needed(ProofLang::FrCa, false), Some("fr_FR"));
+        assert_eq!(dictionary_needed(ProofLang::Fr, true), None);
+        assert_eq!(dictionary_needed(ProofLang::FrCa, true), None);
         assert_eq!(dictionary_needed(ProofLang::Pl, true), None);
         assert_eq!(dictionary_needed(ProofLang::Pt, true), None);
         for l in [ProofLang::En, ProofLang::Bg, ProofLang::Other] {
@@ -916,6 +923,7 @@ mod tests {
         // Installed dictionaries and the built-in English list: no hint.
         pl::test_dict::install();
         pt::test_dict::install();
+        fr::test_dict::install();
         for tag in [Some("pl-PL"), Some("pt-BR"), Some("en-US"), Some("fr-FR"), None] {
             assert_eq!(missing_dictionary(tag), None, "{tag:?}");
         }

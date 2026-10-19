@@ -673,7 +673,7 @@ fn mi_text(ui: &mut Ui, app: &mut WordApp, text: &str, id: &str, params: Value) 
 }
 
 /// The proofing languages the Language menu offers: tag and English name (translated when drawn).
-pub(crate) const PROOFING_LANGUAGES: [(&str, &str); 10] = [
+pub(crate) const PROOFING_LANGUAGES: [(&str, &str); 11] = [
     ("en-US", "English (United States)"),
     ("en-GB", "English (United Kingdom)"),
     ("pl-PL", "Polish"),
