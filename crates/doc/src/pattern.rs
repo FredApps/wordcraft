@@ -41,7 +41,7 @@ pub struct PatternFill {
     pub background: PatternColor,
 }
 
-// Native Word16.113.2 prints ltVert as 1pt foreground, 3pt background, page aligned.
+// Native Word 16.113.2 prints ltVert as 1 pt foreground, 3 pt background, page aligned.
 const PITCH: f32 = 4.0;
 const FOREGROUND_WIDTH: f32 = 1.0;
 const MAX_BANDS: usize = 32_768;
