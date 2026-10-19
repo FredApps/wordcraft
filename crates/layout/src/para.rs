@@ -136,6 +136,8 @@ pub struct Cluster {
     pub obj_d: f32,
     /// The cluster is a decimal separator (decimal tabs align on it).
     pub dot: bool,
+    /// A visible inline drawing eligible for picture-only leading.
+    picture: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +158,9 @@ pub struct Line {
     pub top: f32,
     pub height: f32,
     pub baseline: f32,
+    /// The text's own ascent and descent on this line, without line-spacing leading (the caret's extent).
+    pub text_asc: f32,
+    pub text_desc: f32,
     /// Cluster index range.
     pub c0: usize,
     pub c1: usize,
@@ -1100,6 +1105,7 @@ impl<'a> Builder<'a> {
                     obj_h: 0.0,
                     obj_d: 0.0,
                     dot: s == "." || s == ",",
+                    picture: false,
                 });
             }
         }
@@ -1131,6 +1137,7 @@ impl<'a> Builder<'a> {
                 obj_h: 0.0,
                 obj_d: 0.0,
                 dot: false,
+                picture: false,
             });
             return;
         };
@@ -1164,7 +1171,20 @@ impl<'a> Builder<'a> {
         let style = first.style;
         let g1 = added.last().map(|c| c.g1).unwrap_or(g0);
         self.shown.push((self.clusters.len(), text.to_string(), ranges));
-        self.clusters.push(Cluster { start, end, adv: x, kind: ClKind::Text, style, g0, g1, break_after: false, obj_h: 0.0, obj_d: 0.0, dot: false });
+        self.clusters.push(Cluster {
+            start,
+            end,
+            adv: x,
+            kind: ClKind::Text,
+            style,
+            g0,
+            g1,
+            break_after: false,
+            obj_h: 0.0,
+            obj_d: 0.0,
+            dot: false,
+            picture: false,
+        });
     }
 
     /// Shape `texts` on top of one another as one cluster for `start..end`: each aligned within
@@ -1217,7 +1237,20 @@ impl<'a> Builder<'a> {
         if !text.is_empty() {
             self.shown.push((k, text, ranges));
         }
-        self.clusters.push(Cluster { start, end, adv, kind: ClKind::Text, style, g0, g1, break_after: false, obj_h: 0.0, obj_d: 0.0, dot: false });
+        self.clusters.push(Cluster {
+            start,
+            end,
+            adv,
+            kind: ClKind::Text,
+            style,
+            g0,
+            g1,
+            break_after: false,
+            obj_h: 0.0,
+            obj_d: 0.0,
+            dot: false,
+            picture: false,
+        });
         Some(k)
     }
 }
@@ -1474,6 +1507,7 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                     obj_h: 0.0,
                     obj_d: 0.0,
                     dot: false,
+                    picture: false,
                 });
             }
             continue;
@@ -1522,7 +1556,20 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
             let si = b.style(&rc, None, false);
             let g = b.glyphs.len() as u32;
             let push = |b: &mut Builder, kind: ClKind, adv: f32, h: f32| {
-                b.clusters.push(Cluster { start, end, adv, kind, style: si, g0: g, g1: g, break_after: false, obj_h: h, obj_d: 0.0, dot: false })
+                b.clusters.push(Cluster {
+                    start,
+                    end,
+                    adv,
+                    kind,
+                    style: si,
+                    g0: g,
+                    g1: g,
+                    break_after: false,
+                    obj_h: h,
+                    obj_d: 0.0,
+                    dot: false,
+                    picture: false,
+                })
             };
             match c {
                 '\t' => push(&mut b, ClKind::Tab, 0.0, 0.0),
@@ -1552,6 +1599,15 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                                 let [el, et, er, eb] = float.effect_extent();
                                 let (px, py) = float.spin_pad(w * s, h * s);
                                 push(&mut b, ClKind::Object(k), w * s + el + er + 2.0 * px, h * s + et + eb + 2.0 * py);
+                                if let Some(c) = b.clusters.last_mut() {
+                                    c.picture = match o {
+                                        InlineObject::Image { .. } | InlineObject::Graphic { .. } | InlineObject::Group { .. } => true,
+                                        InlineObject::Shape { kind, story, .. } => {
+                                            *kind != wordcraft_doc::para::ShapeKind::TextBox && story.is_none()
+                                        }
+                                        _ => false,
+                                    };
+                                }
                             } else {
                                 push(&mut b, ClKind::Object(k), 0.0, 0.0);
                             }
@@ -1577,6 +1633,7 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                                     obj_h: a.max(0.01),
                                     obj_d: d,
                                     dot: false,
+                                    picture: false,
                                 });
                             } else if let Some(text) = form.as_ref().and_then(|f| f.shown_text()) {
                                 // A drop-down shows its selected entry, whatever result was saved.
@@ -1641,6 +1698,7 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                                 obj_h: ml.ascent.max(a).max(0.01),
                                 obj_d: ml.descent.max(d),
                                 dot: false,
+                                picture: false,
                             });
                             if *display {
                                 displays.push((b.clusters.len() - 1, math.jc));
@@ -2317,6 +2375,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
             && pl.label.is_none()
             && picture_clusters_only(pl, c0, c1);
         let text_natural = asc + desc;
+        let (text_asc, text_desc) = (asc.max(obj_asc), desc);
         let text_pictures = if obj_asc > asc { obj_asc + desc } else { 0.0 };
         let mut label_extra = 0.0;
         if first && let Some(lab) = &pl.label {
@@ -2443,6 +2502,8 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
             top,
             height,
             baseline,
+            text_asc,
+            text_desc,
             c0,
             c1,
             xs,
@@ -2489,6 +2550,8 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                     top,
                     height: h,
                     baseline: top + if grid.is_some() { h - desc } else { baseline_offset(rp.line_spacing, asc, h, desc) },
+                    text_asc: asc,
+                    text_desc: desc,
                     c0: n,
                     c1: n,
                     xs: vec![x0],
@@ -2633,7 +2696,8 @@ fn baseline_offset(spacing: LineSpacing, asc: f32, height: f32, desc: f32) -> f3
 fn picture_clusters_only(pl: &ParaLayout, c0: usize, c1: usize) -> bool {
     pl.clusters.get(c0..c1).is_some_and(|cs| {
         cs.iter().all(|c| match c.kind {
-            ClKind::Object(i) => !pl.maths.iter().any(|(k, _)| *k == i),
+            // Hidden and floating anchors have no inline extent or font height.
+            ClKind::Object(_) => c.picture || (c.adv == 0.0 && c.obj_h == 0.0),
             ClKind::Space | ClKind::Tab | ClKind::Marker => true,
             _ => false,
         })
@@ -2973,10 +3037,10 @@ impl ParaLayout {
         }
         best
     }
-    /// Line ascent/descent of the paragraph mark (for empty paragraphs and caret height).
+    /// The caret's ascent/descent on a line: the text's own, without line-spacing leading, kept inside the line box.
     pub fn caret_metrics(&self, li: usize) -> (f32, f32) {
         let Some(l) = self.lines.get(li) else { return (10.0, 3.0) };
-        (l.baseline - l.top, l.top + l.height - l.baseline)
+        (l.text_asc.min(l.baseline - l.top), l.text_desc.min(l.top + l.height - l.baseline))
     }
 }
 

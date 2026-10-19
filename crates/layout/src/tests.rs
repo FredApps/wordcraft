@@ -3664,6 +3664,109 @@ fn picture_auto_spacing_leading() {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum NonPicture {
+    CheckBox,
+    TextBox,
+}
+
+fn check_non_picture_floor(kind: NonPicture) {
+    use wordcraft_doc::props::LineSpacing;
+    let mut failures = Vec::new();
+    for multiple in [1.0, 1.15, 2.0] {
+        for with_picture in [false, true] {
+            let mut d = Document::from_text("");
+            let object = match kind {
+                NonPicture::CheckBox => InlineObject::Field {
+                    instr: "FORMCHECKBOX".into(),
+                    result: String::new(),
+                    locked: false,
+                    dirty: false,
+                    code: false,
+                    form: r#"<w:ffData><w:checkBox><w:size w:val="72"/></w:checkBox></w:ffData>"#.into(),
+                },
+                NonPicture::TextBox => {
+                    let id = d.add_part(
+                        wordcraft_doc::PartKind::TextBox,
+                        vec![wordcraft_doc::para_block(wordcraft_doc::Paragraph::with_text("Box text", Default::default()))],
+                    );
+                    let mut object = picture(90.0, 144.0, Default::default());
+                    if let InlineObject::Shape { kind, story, .. } = &mut object {
+                        *kind = wordcraft_doc::para::ShapeKind::TextBox;
+                        *story = Some(id);
+                    }
+                    object
+                }
+            };
+            let chr = wordcraft_doc::CharProps { font: Some("Arial".into()), size: Some(10.0), ..Default::default() };
+            let p = d.para_mut(StoryRef::Body, &Path::top(0)).unwrap();
+            p.props.line_spacing = Some(LineSpacing::Multiple(multiple));
+            p.insert_object(0, object, &chr).unwrap();
+            if with_picture {
+                p.insert_object(p.len(), picture(90.0, 144.0, Default::default()), &chr).unwrap();
+            }
+            let l = lay(&d);
+            let para = l.pages[0]
+                .items
+                .iter()
+                .find_map(|i| match i {
+                    Placed::Lines { story: StoryRef::Body, para, .. } => Some(para),
+                    _ => None,
+                })
+                .unwrap();
+            let line = &para.lines[0];
+            let style = &para.styles[para.clusters[0].style as usize];
+            let tallest = para.clusters.iter().map(|c| c.obj_h).fold(0.0f32, f32::max);
+            assert!(tallest > style.ascent, "the fixture must exceed the text ascent");
+            assert!(line.height.is_finite());
+            // Non-picture objects retain text descent, alone or beside a picture.
+            let expected = (tallest + style.descent).max((style.ascent + style.descent) * multiple);
+            if (line.height - expected).abs() >= 0.01 {
+                failures.push(format!("{kind:?}, picture={with_picture}, spacing={multiple}: {} vs {expected}", line.height));
+            }
+            assert!((line.baseline - line.top - tallest).abs() < 0.01);
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn checkbox_keeps_line_descent() {
+    check_non_picture_floor(NonPicture::CheckBox);
+}
+
+#[test]
+fn textbox_keeps_line_descent() {
+    check_non_picture_floor(NonPicture::TextBox);
+}
+
+#[test]
+fn picture_skips_hidden_box() {
+    use wordcraft_doc::props::LineSpacing;
+    let mut d = Document::from_text("");
+    let id = d.add_part(wordcraft_doc::PartKind::TextBox, vec![]);
+    let mut anchor = picture(90.0, 144.0, wordcraft_doc::para::Float { hidden: true, ..Default::default() });
+    if let InlineObject::Shape { kind, story, .. } = &mut anchor {
+        *kind = wordcraft_doc::para::ShapeKind::TextBox;
+        *story = Some(id);
+    }
+    let chr = wordcraft_doc::CharProps { font: Some("Arial".into()), size: Some(10.0), ..Default::default() };
+    let p = d.para_mut(StoryRef::Body, &Path::top(0)).unwrap();
+    p.props.line_spacing = Some(LineSpacing::Multiple(1.0));
+    p.insert_object(0, anchor, &chr).unwrap();
+    p.insert_object(p.len(), picture(90.0, 144.0, Default::default()), &chr).unwrap();
+    let l = lay(&d);
+    let para = l.pages[0]
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Placed::Lines { story: StoryRef::Body, para, .. } => Some(para),
+            _ => None,
+        })
+        .unwrap();
+    assert!((para.lines[0].height - 144.0).abs() < 0.01, "hidden anchors take no font height");
+}
+
 #[test]
 fn multiple_line_spacing_adds_its_leading_below_the_text() {
     use wordcraft_doc::props::LineSpacing;
@@ -7061,10 +7164,14 @@ fn paragraph_relative_floats_start_above_the_space_before() {
         let mut d = Document::from_text("");
         d.body = vec![wordcraft_doc::para_block(first), wordcraft_doc::para_block(p)];
         let l = lay(&d);
-        let first_bottom = {
-            let c = l.caret(&Pos::body(0, 0)).unwrap();
-            c.top + c.height
-        };
+        let first_bottom = l.pages[0]
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Placed::Lines { path, para, l0, y, .. } if *path == Path::top(0) => para.lines.get(*l0).map(|ln| y + ln.height),
+                _ => None,
+            })
+            .unwrap();
         let top = l.pages[0].items.iter().find_map(|i| if let Placed::Shape { rect, .. } = i { Some(rect.y) } else { None }).unwrap();
         (top, first_bottom)
     };
@@ -9403,4 +9510,23 @@ fn shared_band_grid_spans() {
         })
         .unwrap();
     assert_eq!(height, 27.0);
+}
+
+#[test]
+fn caret_height_ignores_line_spacing() {
+    // #2920: extra line spacing is leading below the text; the caret stays the height of the font.
+    use wordcraft_doc::props::LineSpacing;
+    let caret_height = |spacing: Option<LineSpacing>| {
+        let mut d = Document::new();
+        let chr = wordcraft_doc::CharProps { font: Some("Source Sans 3".into()), size: Some(12.0), ..Default::default() };
+        let mut p = wordcraft_doc::Paragraph::with_text("Alpha probe", chr);
+        p.props = ParaProps { line_spacing: spacing, ..Default::default() };
+        d.body = vec![wordcraft_doc::para_block(p)];
+        lay(&d).caret(&Pos::body(0, 3)).unwrap().height
+    };
+    let single = caret_height(Some(LineSpacing::Multiple(1.0)));
+    for spacing in [LineSpacing::Multiple(2.0), LineSpacing::AtLeast(40.0), LineSpacing::Exactly(40.0)] {
+        let wide = caret_height(Some(spacing));
+        assert!((single - wide).abs() < 0.01, "{spacing:?}: single {single}, wide {wide}");
+    }
 }
