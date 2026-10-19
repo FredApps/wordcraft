@@ -136,6 +136,8 @@ pub struct Cluster {
     pub obj_d: f32,
     /// The cluster is a decimal separator (decimal tabs align on it).
     pub dot: bool,
+    /// A visible inline drawing eligible for picture-only fitting.
+    picture: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +160,9 @@ pub struct Line {
     /// Height needed at the page bottom, excluding extra automatic leading.
     pub(crate) fit_height: f32,
     pub baseline: f32,
+    /// The text's own ascent and descent on this line, without line-spacing leading (the caret's extent).
+    pub text_asc: f32,
+    pub text_desc: f32,
     /// Cluster index range.
     pub c0: usize,
     pub c1: usize,
@@ -349,7 +354,8 @@ pub struct ParaLayout {
     pub notes: Vec<(usize, u32)>,
     /// Proofing issues: (byte start, byte end, grammar?).
     pub issues: Vec<(usize, usize, bool)>,
-    /// Drop cap: (clusters at the start that form it, lines it drops, width with its gap).
+    /// Drop cap: (clusters at the start that form it, lines it drops, the indent of those lines:
+    /// the letter's width and its distance from the text, or 0 in the margin).
     pub drop_cap: Option<(usize, u8, f32)>,
     /// Clusters after which the line may break with a hyphen (soft hyphens, auto hyphenation), sorted.
     pub hyph_after: Vec<u32>,
@@ -419,6 +425,9 @@ pub struct ParaEnv<'a> {
     pub table: Option<&'a CellText>,
     /// Check spelling (and grammar, as the options say) for squiggles; `None` = no squiggles.
     pub proofing: Option<crate::ProofOptions>,
+    /// The byte range of the word being typed in this paragraph: it gets no spelling squiggle
+    /// until the caret leaves it ([`crate::LayoutOptions::typing_word`]).
+    pub typing_word: Option<(usize, usize)>,
     /// How digits look on screen (an unresolved `System` shows Western digits).
     pub numeral: NumeralMode,
     /// Areas text must flow around (floating objects), relative to the paragraph: x from the
@@ -432,6 +441,9 @@ pub struct ParaEnv<'a> {
     /// Shrink inline drawings wider than the line to fit it: in text boxes, which don't clip what
     /// runs past their sides. Elsewhere such a drawing keeps its size and the page edge clips it.
     pub fit_objects: bool,
+    /// Heights of the paragraph's inline text boxes that resize to fit their text, by object
+    /// index: they take these instead of their saved heights.
+    pub fitted: &'a [(usize, f32)],
 }
 
 /// The section's document grid as layout applies it (`w:docGrid`, ECMA-376 §17.6.5).
@@ -616,6 +628,13 @@ pub(crate) fn caps_char(rc: &ResolvedChar, c: char) -> char {
 /// letter's full capital (ß → SS), as body text draws it (#1581).
 pub(crate) fn push_caps(rc: &ResolvedChar, c: char, out: &mut String) {
     if rc.caps || (rc.small_caps && c.is_lowercase()) { out.extend(c.to_uppercase()) } else { out.push(c) }
+}
+
+/// The OpenType ligature features a `w14:ligatures` value sets, each on or off. Required
+/// ligatures (`rlig`, Arabic lam-alef) are never turned off.
+pub(crate) fn ligature_features(l: wordcraft_doc::props::Ligatures) -> [wordcraft_fonts::Feature; 4] {
+    let f = |tag: &[u8; 4], on: bool| wordcraft_fonts::feature_value(tag, on as u32);
+    [f(b"liga", l.standard), f(b"clig", l.contextual), f(b"hlig", l.historical), f(b"dlig", l.discretional)]
 }
 
 /// Whether `c`'s capital is more than one character (ß → SS), so All Caps draws more
@@ -1022,7 +1041,18 @@ impl<'a> Builder<'a> {
                 }
             };
             // The shaper kerns by default; Word kerns only when Kerning for fonts covers the size.
-            let features: &[wordcraft_fonts::Feature] = if rc.kerned() { &[] } else { &no_kern };
+            // Without `w14:ligatures` the shaper's default (standard and contextual) stays.
+            let [kern_off] = no_kern;
+            let all = match rc.ligatures {
+                Some(l) => {
+                    let [a, b, c, d] = ligature_features(l);
+                    [kern_off, a, b, c, d]
+                }
+                None => [kern_off; 5],
+            };
+            let from = usize::from(rc.kerned());
+            let to = if rc.ligatures.is_some() { all.len() } else { 1 };
+            let features: &[wordcraft_fonts::Feature] = all.get(from..to).unwrap_or_default();
             let shaped = if use_levels {
                 wordcraft_fonts::shape_run(&st.face, shape_text, features, map, key.rtl)
             } else {
@@ -1077,6 +1107,7 @@ impl<'a> Builder<'a> {
                     obj_h: 0.0,
                     obj_d: 0.0,
                     dot: s == "." || s == ",",
+                    picture: false,
                 });
             }
         }
@@ -1108,6 +1139,7 @@ impl<'a> Builder<'a> {
                 obj_h: 0.0,
                 obj_d: 0.0,
                 dot: false,
+                picture: false,
             });
             return;
         };
@@ -1141,7 +1173,20 @@ impl<'a> Builder<'a> {
         let style = first.style;
         let g1 = added.last().map(|c| c.g1).unwrap_or(g0);
         self.shown.push((self.clusters.len(), text.to_string(), ranges));
-        self.clusters.push(Cluster { start, end, adv: x, kind: ClKind::Text, style, g0, g1, break_after: false, obj_h: 0.0, obj_d: 0.0, dot: false });
+        self.clusters.push(Cluster {
+            start,
+            end,
+            adv: x,
+            kind: ClKind::Text,
+            style,
+            g0,
+            g1,
+            break_after: false,
+            obj_h: 0.0,
+            obj_d: 0.0,
+            dot: false,
+            picture: false,
+        });
     }
 
     /// Shape `texts` on top of one another as one cluster for `start..end`: each aligned within
@@ -1194,7 +1239,20 @@ impl<'a> Builder<'a> {
         if !text.is_empty() {
             self.shown.push((k, text, ranges));
         }
-        self.clusters.push(Cluster { start, end, adv, kind: ClKind::Text, style, g0, g1, break_after: false, obj_h: 0.0, obj_d: 0.0, dot: false });
+        self.clusters.push(Cluster {
+            start,
+            end,
+            adv,
+            kind: ClKind::Text,
+            style,
+            g0,
+            g1,
+            break_after: false,
+            obj_h: 0.0,
+            obj_d: 0.0,
+            dot: false,
+            picture: false,
+        });
         Some(k)
     }
 }
@@ -1451,6 +1509,7 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                     obj_h: 0.0,
                     obj_d: 0.0,
                     dot: false,
+                    picture: false,
                 });
             }
             continue;
@@ -1466,10 +1525,16 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
             let mut big = (*rc).clone();
             // `clamp` would panic here when the text itself is larger than 1000 pt.
             big.size = (((lines - 1.0) * line_h + rc.size * 0.7) / 0.7).min(1000.0).max(rc.size);
+            if let Some(f) = &rp.drop_cap_font {
+                big.font = f.clone();
+            }
             let before = b.clusters.len();
             b.shape(first, 0, &Arc::new(big), None);
             let w: f32 = b.clusters.get(before..).map(|c| c.iter().map(|c| c.adv).sum()).unwrap_or(0.0);
-            drop_cap = Some((b.clusters.len() - before, rp.drop_cap, w + rc.size * 0.3));
+            // Dropped: the first lines step aside by the letter and its distance from the text.
+            // In margin: they keep their indent and the letter hangs left of them.
+            let indent = if rp.drop_cap_margin { 0.0 } else { w + rp.drop_cap_distance };
+            drop_cap = Some((b.clusters.len() - before, rp.drop_cap, indent));
             drop_cap_w = w;
             // The letter hangs beside the text; lines flow at the indent `break_lines` adds.
             for c in b.clusters.iter_mut().skip(before) {
@@ -1493,11 +1558,26 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
             let si = b.style(&rc, None, false);
             let g = b.glyphs.len() as u32;
             let push = |b: &mut Builder, kind: ClKind, adv: f32, h: f32| {
-                b.clusters.push(Cluster { start, end, adv, kind, style: si, g0: g, g1: g, break_after: false, obj_h: h, obj_d: 0.0, dot: false })
+                b.clusters.push(Cluster {
+                    start,
+                    end,
+                    adv,
+                    kind,
+                    style: si,
+                    g0: g,
+                    g1: g,
+                    break_after: false,
+                    obj_h: h,
+                    obj_d: 0.0,
+                    dot: false,
+                    picture: false,
+                })
             };
             match c {
                 '\t' => push(&mut b, ClKind::Tab, 0.0, 0.0),
                 LINE_BREAK | '\r' => push(&mut b, ClKind::LineBreak, 0.0, 0.0),
+                // Word ignores explicit page breaks in cells, preserving their source offsets.
+                PAGE_BREAK if env.table.is_some() => push(&mut b, ClKind::Marker, 0.0, 0.0),
                 PAGE_BREAK => push(&mut b, ClKind::PageBreak, 0.0, 0.0),
                 COLUMN_BREAK => push(&mut b, ClKind::ColumnBreak, 0.0, 0.0),
                 _ => {
@@ -1506,13 +1586,14 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                     match p.objects.get(k) {
                         Some(o) if o.is_drawing() => {
                             // A hidden one takes no room, and with no height its line doesn't draw it.
-                            if let Some((w, h, float)) = o.frame()
+                            if let Some((w, saved_h, float)) = o.frame()
                                 && float.wrap == wordcraft_doc::para::Wrap::Inline
                                 && !float.hidden
                             {
                                 // A picture wider than the line keeps its size, as in Word: it runs past
                                 // the margin and the page edge clips it (see `ParaEnv::fit_objects`).
                                 let maxw = (env.width - rp.indent_left.max(0.0) - rp.indent_right.max(0.0)).max(18.0);
+                                let h = env.fitted.iter().find(|(i, _)| *i == k).map_or(saved_h, |(_, h)| *h);
                                 let (w, h) = (w.clamp(1.0, 4000.0), h.clamp(1.0, 4000.0));
                                 let s = if env.fit_objects && w > maxw { maxw / w } else { 1.0 };
                                 // The line makes room for effects (shadows) around the picture too, and
@@ -1520,12 +1601,46 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                                 let [el, et, er, eb] = float.effect_extent();
                                 let (px, py) = float.spin_pad(w * s, h * s);
                                 push(&mut b, ClKind::Object(k), w * s + el + er + 2.0 * px, h * s + et + eb + 2.0 * py);
+                                if let Some(c) = b.clusters.last_mut() {
+                                    c.picture = match o {
+                                        InlineObject::Image { .. } | InlineObject::Graphic { .. } | InlineObject::Group { .. } => true,
+                                        InlineObject::Shape { kind, story, .. } => {
+                                            *kind != wordcraft_doc::para::ShapeKind::TextBox && story.is_none()
+                                        }
+                                        _ => false,
+                                    };
+                                }
                             } else {
                                 push(&mut b, ClKind::Object(k), 0.0, 0.0);
                             }
                         }
-                        Some(InlineObject::Field { instr, result, code, .. }) => {
-                            if env.field_codes != *code {
+                        Some(o @ InlineObject::Field { instr, result, code, .. }) => {
+                            let form = if env.field_codes != *code { None } else { o.legacy_form() };
+                            if let Some(wordcraft_doc::legacy_form::LegacyForm::CheckBox { size, .. }) = form {
+                                // Word draws a legacy check box as a square as tall as the text's
+                                // line (its ascent and descent), scaled to an explicit size, and
+                                // takes that much room on the line (see `display::check_box`).
+                                let (a, d) = b.styles.get(si as usize).map_or((rc.size * 0.8, rc.size * 0.2), |s| (s.ascent, s.descent));
+                                let scale = size.map_or(1.0, |sz| sz / rc.size.max(0.5));
+                                let (a, d) = (a * scale, d * scale);
+                                b.clusters.push(Cluster {
+                                    start,
+                                    end,
+                                    adv: a + d,
+                                    kind: ClKind::Object(k),
+                                    style: si,
+                                    g0: g,
+                                    g1: g,
+                                    break_after: false,
+                                    obj_h: a.max(0.01),
+                                    obj_d: d,
+                                    dot: false,
+                                    picture: false,
+                                });
+                            } else if let Some(text) = form.as_ref().and_then(|f| f.shown_text()) {
+                                // A drop-down shows its selected entry, whatever result was saved.
+                                b.shape_atomic(text, start, end, &rc);
+                            } else if env.field_codes != *code {
                                 // The code in braces on grey, like Word's field shading.
                                 let mut shaded = (*rc).clone();
                                 if shaded.highlight.is_none() && shaded.shading.is_none() {
@@ -1585,6 +1700,7 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                                 obj_h: ml.ascent.max(a).max(0.01),
                                 obj_d: ml.descent.max(d),
                                 dot: false,
+                                picture: false,
                             });
                             if *display {
                                 displays.push((b.clusters.len() - 1, math.jc));
@@ -1660,6 +1776,22 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
         if (o == unicode_linebreak::BreakOpportunity::Allowed || i < text.len()) && !after_slash {
             found.push(i);
         }
+    }
+    // UAX #14 (LB13) also forbids a break between a space and a slash, so with the break after the
+    // slash gone as well, "caption /word" had no break at all and the word split mid-letter. Word
+    // wraps "/word" whole to the next line: break before a slash that starts a word.
+    let before_slash: Vec<usize> = text
+        .match_indices('/')
+        .filter(|&(i, _)| {
+            text.get(..i).and_then(|t| t.chars().next_back()).is_some_and(|c| c.is_whitespace() && !matches!(c, '\u{a0}' | '\u{2007}' | '\u{202f}'))
+                && text.get(i + 1..).and_then(|t| t.chars().next()).is_some_and(char::is_alphanumeric)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if !before_slash.is_empty() {
+        found.extend(before_slash);
+        found.sort_unstable();
+        found.dedup();
     }
     // Myanmar has no spaces between words: it wraps between syllables.
     if text.chars().any(|c| matches!(u32::from(c), 0x1000..=0x109F | 0xA9E0..=0xA9FF | 0xAA60..=0xAA7F)) {
@@ -1743,7 +1875,7 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
         text_len: p.text.len(),
         has_page_fields,
         notes,
-        issues: env.proofing.map(|o| proof_issues(p, &runs, &o)).unwrap_or_default(),
+        issues: env.proofing.map(|o| proof_issues(p, &runs, &o, env.typing_word, is_list_item(doc, p))).unwrap_or_default(),
         drop_cap,
         hyph_after: Vec::new(),
         bidi_levels: b.levels,
@@ -1830,9 +1962,11 @@ fn ptab_stop(align: PTabAlign, base: PTabBase, leader: TabLeader, width: f32, in
 }
 
 fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Option<&Level>) {
+    // Narrow cells and float spans must retain their usable width.
+    const MIN_LINE_WIDTH: f32 = 1.0;
     let suffix = level.map(|l| l.suffix);
     let rp = pl.rp.clone();
-    let width = env.width.max(12.0);
+    let width = env.width.max(MIN_LINE_WIDTH);
     let base_right = (width - rp.indent_right).max(1.0);
     let default_tab = env.doc.settings.default_tab;
     let first_left = rp.indent_left + rp.indent_first;
@@ -1905,6 +2039,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
             loop {
                 let mut lo = if first { first_left } else { rp.indent_left };
                 if let Some((_, dl, dw)) = pl.drop_cap
+                    && dw > 0.0
                     && lines.len() < dl as usize
                 {
                     lo = first_left.max(rp.indent_left) + dw;
@@ -1914,7 +2049,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                         narrowed = !rest.is_empty() || a > lo || b < base_right;
                         row_rest = rest;
                         row_first = lines.len();
-                        break (a, b.max(a + 12.0));
+                        break (a, b.max(a + MIN_LINE_WIDTH));
                     }
                     Err(below) if below > top && guard < 50 => {
                         top = below;
@@ -1922,7 +2057,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                     }
                     Ok((None, _)) | Err(_) => {
                         row_first = lines.len();
-                        break (lo, base_right.max(lo + 12.0));
+                        break (lo, base_right.max(lo + MIN_LINE_WIDTH));
                     }
                 }
             }
@@ -2044,8 +2179,11 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
             let fits =
                 absorbs || x + c.adv - pl.auto_space_after(j) <= right_edge + shrink + 0.01 || c.kind == ClKind::Space || c.kind == ClKind::Marker;
             // A line's first item stays on it even when it doesn't fit; markers before it
-            // (a content control's start, a bookmark) take no room and don't count (Word).
-            if !fits && (c0..j).any(|k| pl.clusters.get(k).is_some_and(|c| c.kind != ClKind::Marker)) {
+            // (a content control's start, a bookmark) and floating objects' anchors take no room
+            // and don't count (Word: a picture a little wider than the line, after an anchor,
+            // stays on the first line rather than leaving the anchor a line of its own).
+            let takes_room = |c: &Cluster| c.kind != ClKind::Marker && !(matches!(c.kind, ClKind::Object(_)) && c.adv == 0.0 && c.obj_h == 0.0);
+            if !fits && (c0..j).any(|k| pl.clusters.get(k).is_some_and(takes_room)) {
                 // Wrap: back up to the last break opportunity on this line.
                 end = LineEnd::Wrap;
                 // Hyphenate only when the plain break leaves more than the hyphenation zone empty.
@@ -2202,7 +2340,9 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
             // Spaces and tabs never make a line taller, whatever their size: Word sizes a line by
             // its other characters (a line of only them takes the paragraph mark's), measured in
             // Word for Windows with 9 pt text and 11–20 pt tabs, spaces and ideographic spaces.
-            if matches!(c.kind, ClKind::Marker | ClKind::Space | ClKind::Tab) || c0 + k < dropped {
+            // Floating and hidden drawings have no inline extent; their anchor font takes no height.
+            let anchor = matches!(c.kind, ClKind::Object(_)) && c.adv == 0.0 && c.obj_h == 0.0;
+            if matches!(c.kind, ClKind::Marker | ClKind::Space | ClKind::Tab) || anchor || c0 + k < dropped {
                 continue;
             }
             if let Some(st) = pl.styles.get(c.style as usize) {
@@ -2210,8 +2350,9 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                 // and descent, and grows above the baseline to fit a taller picture.
                 let (a, d) = if matches!(c.kind, ClKind::Object(_)) && c.obj_h > 0.0 {
                     if pl.maths.iter().any(|(k, _)| c.kind == ClKind::Object(*k)) {
-                        // An equation is text: its ascent and descent count like the text's.
-                        (c.obj_h, c.obj_d)
+                        // Exact spacing keeps the run's baseline; tall math may overflow the
+                        // fixed line box without moving adjacent text up by its denominator.
+                        if matches!(rp.line_spacing, LineSpacing::Exactly(_)) { (st.ascent, st.descent) } else { (c.obj_h, c.obj_d) }
                     } else {
                         obj_asc = obj_asc.max(c.obj_h);
                         (st.ascent, st.descent)
@@ -2232,6 +2373,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
             desc = st.descent;
         }
         let text_natural = asc + desc;
+        let (text_asc, text_desc) = (asc.max(obj_asc), desc);
         let text_pictures = if obj_asc > asc { obj_asc + desc } else { 0.0 };
         let mut label_extra = 0.0;
         if first && let Some(lab) = &pl.label {
@@ -2364,6 +2506,8 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
             height,
             fit_height,
             baseline,
+            text_asc,
+            text_desc,
             c0,
             c1,
             xs,
@@ -2411,6 +2555,8 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                     height: h,
                     fit_height: if grid.is_none() && matches!(rp.line_spacing, LineSpacing::Multiple(m) if m > 1.0) { natural } else { h },
                     baseline: top + if grid.is_some() { h - desc } else { baseline_offset(rp.line_spacing, asc, h, desc) },
+                    text_asc: asc,
+                    text_desc: desc,
                     c0: n,
                     c1: n,
                     xs: vec![x0],
@@ -2439,7 +2585,9 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
     {
         let short = lines.len() < dl as usize;
         let dy = if short { (dl as f32 - 1.0) * l0.height } else { ln.baseline - l0.baseline };
-        let dx = dw.min(first_x0.unwrap_or(0.0) - first_left.max(rp.indent_left));
+        let lead = first_x0.unwrap_or(0.0) - first_left.max(rp.indent_left);
+        // In margin, the letter's right edge stays the distance away from the text's edge.
+        let dx = if rp.drop_cap_margin { lead.max(0.0) + pl.drop_cap_w + rp.drop_cap_distance } else { dw.min(lead) };
         // Toward the start edge: left, or right (and from the letter's right edge) when mirrored.
         let dx = if rtl_para { pl.drop_cap_w - dx } else { dx };
         if short {
@@ -2554,7 +2702,8 @@ fn baseline_offset(spacing: LineSpacing, asc: f32, height: f32, desc: f32) -> f3
 fn picture_clusters_only(pl: &ParaLayout, c0: usize, c1: usize) -> bool {
     pl.clusters.get(c0..c1).is_some_and(|cs| {
         cs.iter().all(|c| match c.kind {
-            ClKind::Object(i) => !pl.maths.iter().any(|(k, _)| *k == i),
+            // Hidden and floating anchors have no inline extent or font height.
+            ClKind::Object(_) => c.picture || (c.adv == 0.0 && c.obj_h == 0.0),
             ClKind::Space | ClKind::Tab | ClKind::Marker => true,
             _ => false,
         })
@@ -2894,10 +3043,10 @@ impl ParaLayout {
         }
         best
     }
-    /// Line ascent/descent of the paragraph mark (for empty paragraphs and caret height).
+    /// The caret's ascent/descent on a line: the text's own, without line-spacing leading, kept inside the line box.
     pub fn caret_metrics(&self, li: usize) -> (f32, f32) {
         let Some(l) = self.lines.get(li) else { return (10.0, 3.0) };
-        (l.baseline - l.top, l.top + l.height - l.baseline)
+        (l.text_asc.min(l.baseline - l.top), l.text_desc.min(l.top + l.height - l.baseline))
     }
 }
 
@@ -2933,21 +3082,41 @@ fn lang_at(runs: &[ProofRun], off: usize) -> wordcraft_proof::ProofLang {
 /// Spelling and grammar issues in a paragraph, in order: each word in its run's language
 /// ([`wordcraft_proof::check_text_with`]: what spelling skips, and grammar only with `grammar`),
 /// and none touching a run left unchecked.
-pub fn paragraph_issues(p: &Paragraph, runs: &[ProofRun], spelling: &wordcraft_proof::Options, grammar: bool) -> Vec<wordcraft_proof::Issue> {
+///
+/// `list_item` (see [`is_list_item`]) turns off the capital-first-word grammar rule.
+pub fn paragraph_issues(
+    p: &Paragraph,
+    runs: &[ProofRun],
+    spelling: &wordcraft_proof::Options,
+    grammar: bool,
+    list_item: bool,
+) -> Vec<wordcraft_proof::Issue> {
     if p.text.trim().is_empty() || p.text.len() > 100_000 {
         return Vec::new();
     }
     let text = proof_text(p);
     let spans: Vec<(std::ops::Range<usize>, wordcraft_proof::ProofLang)> = runs.iter().map(|r| (r.range.clone(), r.lang)).collect();
     let skip = |a: usize, b: usize| runs.iter().any(|r| r.skip && r.range.start < b && a < r.range.end);
-    wordcraft_proof::check_text_with(&text, &spans, spelling, grammar).into_iter().filter(|i| !skip(i.start, i.end)).collect()
+    wordcraft_proof::check_text_with(&text, &spans, spelling, grammar, list_item).into_iter().filter(|i| !skip(i.start, i.end)).collect()
 }
 
-/// Spelling and grammar issues in a paragraph as squiggles: (start, end, is grammar).
-fn proof_issues(p: &Paragraph, runs: &[ProofRun], opts: &crate::ProofOptions) -> Vec<(usize, usize, bool)> {
-    paragraph_issues(p, runs, &opts.spelling, opts.grammar)
+/// Whether the paragraph is a list item: its own numbering, or its style's, names a list (not 0).
+pub fn is_list_item(doc: &Document, p: &Paragraph) -> bool {
+    p.props.numbering.or_else(|| doc.styles.resolve_para(&p.props).numbering).is_some_and(|n| n.num != 0)
+}
+
+/// Spelling and grammar issues as squiggles (start, end, is grammar), less spelling issues overlapping `typing`.
+fn proof_issues(
+    p: &Paragraph,
+    runs: &[ProofRun],
+    opts: &crate::ProofOptions,
+    typing: Option<(usize, usize)>,
+    list_item: bool,
+) -> Vec<(usize, usize, bool)> {
+    paragraph_issues(p, runs, &opts.spelling, opts.grammar, list_item)
         .into_iter()
         .map(|i| (i.start, i.end, i.kind == wordcraft_proof::IssueKind::Grammar))
+        .filter(|&(a, b, grammar)| grammar || !typing.is_some_and(|(s, e)| a < e && s < b))
         .collect()
 }
 
@@ -2989,6 +3158,7 @@ mod label_spacing_tests {
             hide_deleted: Default::default(),
             table: None,
             proofing: None,
+            typing_word: None,
             field_codes: false,
             grid: Grid::default(),
             exclusions: &[],
@@ -2996,6 +3166,7 @@ mod label_spacing_tests {
             numeral: crate::NumeralMode::default(),
             read_line_spacing: None,
             fit_objects: false,
+            fitted: &[],
         };
         let mut p = Paragraph::with_text(if wrap { "Alpha probe synthetic business text repeated" } else { "Alpha probe" }, Default::default());
         p.props.line_spacing = Some(spacing);
