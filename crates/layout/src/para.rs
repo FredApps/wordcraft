@@ -2472,7 +2472,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
         };
 
         let fit_height = if !centred && matches!(rp.line_spacing, LineSpacing::Multiple(m) if m > 1.0) {
-            let desc = if obj_asc > asc && pl.label.is_none() && picture_clusters_only(pl, c0, c1) { 0.0 } else { desc };
+            let desc = if obj_asc > asc && (!first || pl.label.is_none()) && picture_clusters_only(pl, c0, c1) { 0.0 } else { desc };
             (baseline - top + desc).min(height)
         } else {
             height

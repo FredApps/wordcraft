@@ -9698,3 +9698,70 @@ fn collapsed_after_fitted_line() {
         }
     }
 }
+
+#[test]
+fn label_picture_fit_is_local() {
+    use wordcraft_doc::props::{LineSpacing, NumRef};
+
+    enum PictureLine {
+        First,
+        Second,
+    }
+
+    for picture_line in [PictureLine::First, PictureLine::Second] {
+        let chr = wordcraft_doc::CharProps { font: Some("Source Sans 3".into()), size: Some(10.0), ..Default::default() };
+        let mut d = Document::new();
+        let num = d.numbering.add_list(wordcraft_doc::ListKind::Bullet);
+        let prefix = match picture_line {
+            PictureLine::First => "",
+            PictureLine::Second => "Intro\n",
+        };
+        let mut p = Paragraph::with_text(prefix, chr.clone());
+        p.props.numbering = Some(NumRef { num, level: 0 });
+        p.props.space_before = Some(0.0);
+        p.props.space_after = Some(0.0);
+        p.props.widow_control = Some(false);
+        p.props.line_spacing = Some(LineSpacing::Multiple(2.0));
+        p.insert_object(p.len(), picture(100.0, 70.0, Default::default()), &chr).unwrap();
+        d.body = vec![wordcraft_doc::para_block(p.clone())];
+        let measured = lay(&d);
+        let para = measured.pages[0]
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Placed::Lines { para, .. } => Some(para),
+                _ => None,
+            })
+            .unwrap();
+        assert!(para.label.is_some());
+        let ci = para.clusters.iter().position(|c| matches!(c.kind, para::ClKind::Object(_))).unwrap();
+        let li = para.lines.iter().position(|line| line.c0 <= ci && ci < line.c1).unwrap();
+        assert_eq!(li, usize::from(matches!(picture_line, PictureLine::Second)));
+        let line = &para.lines[li];
+        let desc = para.styles[para.clusters[ci].style as usize].descent;
+        let baseline = line.baseline - line.top;
+        assert!(desc > 0.0 && baseline + desc <= line.height);
+        let expected = match picture_line {
+            PictureLine::First => baseline + desc,
+            PictureLine::Second => baseline,
+        };
+        assert!((line.fit_height - expected).abs() < 0.01, "line {li}: {} vs {expected}", line.fit_height);
+
+        let room = line.top + baseline + desc / 2.0;
+        let mut filler = Paragraph::with_text("Filler", chr);
+        filler.props.space_before = Some(0.0);
+        filler.props.space_after = Some(0.0);
+        filler.props.line_spacing = Some(LineSpacing::Exactly(220.0 - room));
+        d.last_section.page_h = 260.0;
+        d.last_section.margin_top = 20.0;
+        d.last_section.margin_bottom = 20.0;
+        d.body = vec![wordcraft_doc::para_block(filler), wordcraft_doc::para_block(p)];
+        let placed = lay(&d);
+        let page = placed.caret(&Pos::body(1, prefix.len())).unwrap().page;
+        let expected_page = match picture_line {
+            PictureLine::First => 1,
+            PictureLine::Second => 0,
+        };
+        assert_eq!(page, expected_page, "only the picture line bearing the label keeps descent");
+    }
+}
