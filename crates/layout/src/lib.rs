@@ -3626,7 +3626,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
             } else {
                 0.0
             };
-            let over = bottom + tail > limit + 0.01;
+            let over = pl.height > 0.0 && bottom + tail > limit + 0.01;
             // Notes too long for the rest of the page continue on the next one: the line still
             // fits if the notes before its last one, and that one's first line, fit below it.
             // The notes then take the rest of the page.

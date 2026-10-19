@@ -9638,3 +9638,63 @@ fn checkbox_keeps_bottom_floor() {
 fn textbox_keeps_bottom_floor() {
     check_object_bottom_floor(FitObject::TextBox);
 }
+
+#[test]
+fn collapsed_after_fitted_line() {
+    use wordcraft_doc::props::LineSpacing;
+    let options = LayoutOptions { hide_deleted: true, ..Default::default() };
+    for multiple in [1.15, 2.0] {
+        let chr = wordcraft_doc::CharProps { font: Some("Source Sans 3".into()), size: Some(48.0), ..Default::default() };
+        let mut first = Paragraph::with_text("Before", chr.clone());
+        first.props.space_before = Some(0.0);
+        first.props.space_after = Some(0.0);
+        first.props.line_spacing = Some(LineSpacing::Multiple(multiple));
+        let mut d = Document::new();
+        d.body = vec![wordcraft_doc::para_block(first)];
+        let measured = layout(&d, &mut LayoutCache::new(), &options);
+        let para = measured.pages[0]
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Placed::Lines { story: StoryRef::Body, para, .. } => Some(para),
+                _ => None,
+            })
+            .unwrap();
+        let line = &para.lines[0];
+        assert!(line.fit_height < line.height - 0.1, "fixture needs excess automatic leading");
+        let room = (line.fit_height + line.height) / 2.0;
+        assert!(room > 36.0, "fixture exceeds the minimum body height");
+        d.last_section.margin_top = 20.0;
+        d.last_section.margin_bottom = 20.0;
+        d.last_section.page_h = 40.0 + room;
+        for deleted in [false, true] {
+            let mut next = Paragraph::with_text("Deleted", wordcraft_doc::CharProps { del: deleted.then_some(0), ..chr.clone() });
+            next.mark.del = deleted.then_some(0);
+            next.props.space_before = Some(0.0);
+            next.props.space_after = Some(0.0);
+            d.body.truncate(1);
+            d.body.push(wordcraft_doc::para_block(next));
+            let laid = layout(&d, &mut LayoutCache::new(), &options);
+            if deleted {
+                let hidden = laid
+                    .pages
+                    .iter()
+                    .flat_map(|page| &page.items)
+                    .find_map(|item| match item {
+                        Placed::Lines { story: StoryRef::Body, path, para, .. } if *path == Path::top(1) => Some(para),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(hidden.height, 0.0, "deleted paragraph must collapse");
+                assert!(!hidden.lines.is_empty(), "collapsed paragraph retains its caret line");
+                for line in &hidden.lines {
+                    assert_eq!(line.height, 0.0, "collapsed line height");
+                    assert_eq!(line.fit_height, 0.0, "collapsed line fit height");
+                }
+            }
+            let expected = if deleted { 0 } else { 1 };
+            assert_eq!(laid.caret(&Pos::body(1, 0)).unwrap().page, expected, "spacing={multiple}, deleted={deleted}");
+            assert_eq!(laid.pages.len(), expected + 1, "spacing={multiple}, deleted={deleted}");
+        }
+    }
+}
