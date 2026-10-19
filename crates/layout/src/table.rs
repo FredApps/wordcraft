@@ -972,6 +972,7 @@ pub fn split_row(row: &RowLayout, cut: f32) -> Option<(RowLayout, RowLayout)> {
                     {
                         Some(rect.bottom())
                     }
+                    Placed::Object { rect, wrap, .. } if *wrap != wordcraft_doc::para::Wrap::BehindText && fits(rect.bottom()) => Some(rect.bottom()),
                     Placed::Cell { rect, table, .. } if Some(table.0.len()) > own_depth && rect.y < cut => Some(rect.bottom().min(cut)),
                     _ => None,
                 }
