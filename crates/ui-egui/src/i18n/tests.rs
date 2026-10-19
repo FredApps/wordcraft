@@ -1137,6 +1137,12 @@ fn new_documents_take_the_region_of_the_system_locale() {
     assert_eq!(fr.editing_lang_in(&locales(&["en-US", "fr-CA"])).as_deref(), Some("fr-CA"));
     assert_eq!(fr.editing_lang_in(&locales(&["en-US"])).as_deref(), Some("fr-FR"));
     assert_eq!(fr.editing_lang_in(&locales(&["fr"])).as_deref(), Some("fr-FR"));
+    for locale in ["fr-u-ca-gregory", "fr-Latn-u-ca-gregory", "fr-x-ca", "fr-1901-CA"] {
+        assert_eq!(fr.editing_lang_in(&locales(&[locale])).as_deref(), Some("fr-FR"), "{locale}");
+    }
+    for locale in ["fr-Latn-CA", "fr-CA-u-ca-gregory", "fr_Latn_CA.UTF-8"] {
+        assert_eq!(fr.editing_lang_in(&locales(&[locale])).as_deref(), Some("fr-CA"), "{locale}");
+    }
     assert_eq!(fr.editing_lang_in(&[]).as_deref(), Some("fr-FR"));
     assert_eq!(lang("it").editing_lang_in(&locales(&["it_CH.UTF-8"])).as_deref(), Some("it-CH"));
     // An interface that names its region keeps it; one that writes no language stays without.

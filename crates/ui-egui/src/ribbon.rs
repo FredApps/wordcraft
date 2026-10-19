@@ -3309,7 +3309,9 @@ mod tests {
         assert_eq!(h.state().dialog.as_ref().map(crate::dialogs::Dialog::name), Some("language"));
         h.state_mut().dialog = None;
         // French for the whole document: the menu and the status bar name it.
-        h.state_mut().run("review.language", json!({"lang": "fr-FR", "default": true})).unwrap();
+        h.state_mut().run("select.all", json!({})).unwrap();
+        h.run();
+        h.get(item("French (France)")).click();
         h.run();
         assert_eq!(caret_language(h.state()), "French (France)");
         assert!(h.query(item("French (France)")).is_some(), "the current language is listed and checked");

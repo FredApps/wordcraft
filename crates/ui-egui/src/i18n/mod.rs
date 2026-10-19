@@ -243,7 +243,13 @@ impl Lang {
             if !parts.next()?.eq_ignore_ascii_case(self.0.code) {
                 return None;
             }
-            let region = parts.find(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_alphabetic()))?;
+            let first = parts.next()?;
+            let region = if first.len() == 4 && first.chars().all(|c| c.is_ascii_alphabetic()) { parts.next()? } else { first };
+            // A region follows the language and optional script. Later extension keys (such
+            // as `ca` in `fr-u-ca-gregory`) must never change the proofing region.
+            if region.len() != 2 || !region.chars().all(|c| c.is_ascii_alphabetic()) {
+                return None;
+            }
             wordcraft_engine::proof::lang::normalize_tag(&format!("{}-{region}", self.0.code))
         });
         Some(regional.unwrap_or_else(|| default.to_string()))

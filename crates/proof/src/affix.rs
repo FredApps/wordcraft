@@ -577,12 +577,16 @@ impl AffixDict {
             let Some((word, _)) = stems.get(i) else { break };
             let mut mask = FlagSet::default();
             let mut every_no_suggest = true;
+            let mut every_need_affix = true;
+            let mut every_keep_case = true;
             let mut j = i;
             while let Some((w, f)) = stems.get(j)
                 && w == word
             {
                 let entry = set_of(f);
                 every_no_suggest &= entry.intersects(no_suggest);
+                every_need_affix &= entry.intersects(need_affix);
+                every_keep_case &= entry.intersects(keep_case);
                 mask = mask.union(entry);
                 j += 1;
             }
@@ -590,6 +594,14 @@ impl AffixDict {
             // every entry spelled like it is marked.
             if !every_no_suggest {
                 mask = mask.without(no_suggest);
+            }
+            // A restricted symbol/prefix homonym must not restrict an ordinary word of the
+            // same spelling. Keep each restriction only when all homonyms require it.
+            if !every_need_affix {
+                mask = mask.without(need_affix);
+            }
+            if !every_keep_case {
+                mask = mask.without(keep_case);
             }
             let next_id = u16::try_from(d.sets.len()).map_err(|_| "too many distinct flag sets".to_string())?;
             let id = *set_ids.entry(mask).or_insert(next_id);
@@ -1535,10 +1547,15 @@ pub(crate) mod tests {
         // `bar` the unit is NOSUGGEST and KEEPCASE, `bar` the noun is an ordinary word.
         let aff = "SET UTF-8\nFLAG long\nNOSUGGEST --\nKEEPCASE ||\nSFX S. Y 1\nSFX S. 0 s .\n";
         let d = AffixDict::from_hunspell(aff, "3\nbar/S.\nbar/||--\ncgr/||--\n", &[]).unwrap();
+        assert!(d.check("Bar"), "the ordinary noun permits sentence capitals");
         assert!(d.contains_suggestible("bar") && d.contains_suggestible("bars"), "the noun stays suggestible");
         assert!(!d.contains_suggestible("cgr") && d.contains("cgr"), "a symbol with one entry doesn't");
         let back = AffixDict::from_bytes(&d.to_bytes()).unwrap();
         assert!(back.contains_suggestible("bars") && !back.contains_suggestible("cgr"), "both survive a round trip");
+        assert!(back.check("Bar") && !back.check("Cgr"), "only the symbol keeps KEEPCASE after serialization");
+        let d = AffixDict::from_hunspell("NEEDAFFIX N\nSFX S Y 1\nSFX S 0 s .\n", "4\nroot/NS\nroot/S\nonly/NS\nonly/N\n", &[]).unwrap();
+        assert!(d.check("root") && d.check("roots"), "one unrestricted homonym permits the bare word");
+        assert!(!d.check("only") && d.check("onlys"), "all restricted homonyms still require an affix");
     }
 
     /// `.aff` text built from random pieces with the features the French dictionary uses.
