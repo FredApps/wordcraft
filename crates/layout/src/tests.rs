@@ -9598,8 +9598,9 @@ fn ref_thai_retains_atomic_face() {
     const TEXT: &str = "ไทย Latin 123";
     const FONT: &str = "TH Missing REF 2473";
     let db = wordcraft_fonts::FontDb::global();
-    if db.fallback_for('ไ', 0).is_none() {
-        eprintln!("UNEXERCISED_REF_THAI_FACE: no Thai font input; this run is not font qualification");
+    let run: Vec<char> = TEXT.chars().filter(|c| !c.is_whitespace()).collect();
+    if db.fallback_for_run(&run, 0, false, false).is_none() {
+        eprintln!("UNEXERCISED_REF_THAI_FACE: no face covers the complete Thai/Latin run; this run is not font qualification");
         return;
     }
     assert!(wordcraft_fonts::word::resolve(FONT, false, false).substituted);
