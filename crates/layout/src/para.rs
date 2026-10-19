@@ -1180,6 +1180,15 @@ impl<'a> Builder<'a> {
             self.shape_atomic(text, start, end, rc);
             return;
         }
+        // A missing Thai font selects its substitute from the complete result, including Latin.
+        // Keep that result atomic until split pieces can share the whole-result font choice.
+        if wordcraft_fonts::word::is_thai_family(&rc.font)
+            && text.chars().any(|c| matches!(u32::from(c), 0x0E00..=0x0E7F))
+            && wordcraft_fonts::word::resolve(lookup_family(self.env.doc, &rc.font), rc.bold, rc.italic).substituted
+        {
+            self.shape_atomic(text, start, end, rc);
+            return;
+        }
         let first = self.clusters.len();
         for piece in text.split_inclusive(' ') {
             if let Some(word) = piece.strip_suffix(' ') {

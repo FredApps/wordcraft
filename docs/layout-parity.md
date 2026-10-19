@@ -190,7 +190,7 @@ No overall parity estimate changes from these probes.
 | Large real-world documents (500+ pages, many pictures) | not measured | | gap |
 | Scrolling a 1,096-page document that is one 5,300-row table (#811) | ~2.4 ms idle, ~4.5 ms median scroll frame (was ~600 ms); opening still lays out for ~4–8 s | not measured | measured 2026-10-12, release, headless (`tests_perf::big_table_scroll_bench`) |
 
-Simple left-to-right cached REF results wrap at ordinary spaces while retaining stored text, formatting and field identity. A synthetic Word probe confirms multiword result wrapping. Direction-sensitive results and odd-level host positions keep the existing atomic whole-result isolate. Wrapping those results, other field types and global refresh policy remain separate gaps.
+Simple left-to-right cached REF results wrap at ordinary spaces while retaining stored text, formatting and field identity. A synthetic Word probe confirms multiword result wrapping. Results containing Thai and requesting a missing Thai font stay atomic to preserve whole-result font selection for Thai and Latin; ordinary-space wrapping of those results remains unqualified. Direction-sensitive results and odd-level host positions keep the existing atomic whole-result isolate. Wrapping those results, other field types and global refresh policy remain separate gaps.
 
 TOC refresh includes heading and outline paragraphs inside tables, including nested cells. Links and page numbers retain their full paragraph paths when entries move body blocks. The existing link picker still accepts top-level heading block indices.
 
@@ -216,6 +216,7 @@ Page-relative footer tables keep their physical wrap bounds without adding to fo
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | trivial | Keep Thai-containing cached REF results atomic when their requested Thai font is missing; ordinary-space Thai wrapping remains unqualified. No new Word comparison. |
 | 2026-10-19 | trivial | Preserve atomic REF bidi shaping for direction-sensitive results and host levels; ordinary-space reflow remains limited to simple left-to-right results. |
 | 2026-10-16 | trivial | Cached REF result wrapping, formatting and caret positions |
 
