@@ -897,14 +897,14 @@ fn draw(ctx: &mut RenderContext, doc: &Document, it: &Draw, view: Affine, visibl
                 ctx.pop_layer();
             }
         }
-        Draw::Path { segs, fill, stroke, stroke_width, dash } => {
+        Draw::Path { segs, fill, fill_alpha, stroke, stroke_width, dash } => {
             let path = wordcraft_layout::display::seg_path(segs);
             if path.elements().is_empty() {
                 return;
             }
             ctx.set_transform(view);
             if let Some(f) = fill {
-                ctx.set_paint(color(opts.ink(*f), 1.0));
+                ctx.set_paint(color(opts.ink(*f), *fill_alpha));
                 ctx.fill_path(&path);
             }
             if let Some(s) = stroke {
@@ -993,7 +993,8 @@ fn draw(ctx: &mut RenderContext, doc: &Document, it: &Draw, view: Affine, visibl
             // Soft edges: the fill fades out toward the outline (which fades with it).
             if let (Some(rad), Some(f), true) = (fx.soft_edge, fill, can_fill) {
                 let rad = rad.min(rect.w.min(rect.h) / 2.0).max(0.0);
-                for (g, a) in wordcraft_doc::effects::bands(-rad, 0.0, 1.0) {
+                let opacity = if fill_alpha.is_finite() { fill_alpha.clamp(0.0, 1.0) } else { 1.0 };
+                for (g, a) in wordcraft_doc::effects::bands(-rad, 0.0, opacity) {
                     let rr = r.inflate(g as f64, g as f64);
                     if rr.width() > 0.0 && rr.height() > 0.0 {
                         ctx.set_paint(color(opts.ink(*f), a));
@@ -2030,3 +2031,6 @@ mod tests {
 mod cache_tests;
 #[cfg(test)]
 mod tests_color_glyphs;
+
+#[cfg(test)]
+mod fill_alpha_tests;

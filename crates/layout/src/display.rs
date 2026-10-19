@@ -89,8 +89,8 @@ pub enum Draw {
     /// An ink stroke: a line through `pts` (page points) with round ends and joins, `width`
     /// wide, in `color` at opacity `alpha`.
     Ink { pts: Vec<(f32, f32)>, color: Rgb, width: f32, alpha: f32 },
-    /// A vector path (a chart's or diagram's polygons, slices, lines): filled, then stroked.
-    Path { segs: Vec<PathSeg>, fill: Option<Rgb>, stroke: Option<Rgb>, stroke_width: f32, dash: Vec<f32> },
+    /// A vector path: filled at `fill_alpha` opacity, then stroked independently.
+    Path { segs: Vec<PathSeg>, fill: Option<Rgb>, fill_alpha: f32, stroke: Option<Rgb>, stroke_width: f32, dash: Vec<f32> },
     /// An inline chart or diagram's draws, as one figure with its alt text (for tagged PDF).
     Figure { alt: String, kind: GraphicKind, draws: Vec<Draw> },
     /// A formatting mark (¶ · → ↵) in the UI's mark colour, or in `color` (a tracked
@@ -1399,7 +1399,7 @@ fn graphic_draws(doc: &Document, g: &Graphic, rect: Rect, alpha: f32) -> Vec<Dra
             }),
             GraphicItem::Path { segs, fill, stroke, stroke_width } => {
                 let segs = page_segs(segs, |x, y| (rect.x + x * sx, rect.y + y * sy));
-                out.push(Draw::Path { segs, fill: *fill, stroke: *stroke, stroke_width: stroke_width * k, dash: Vec::new() })
+                out.push(Draw::Path { segs, fill: *fill, fill_alpha: 1.0, stroke: *stroke, stroke_width: stroke_width * k, dash: Vec::new() })
             }
             GraphicItem::Text { rect: r, .. } => out.extend(text_glyphs(doc, inside(r), it, alpha, k)),
             GraphicItem::Image { rect: r, media } => {
@@ -1517,7 +1517,14 @@ fn shape_draws(
             segs.push(PathSeg::Close);
         }
         let width = path_stroke_width(width);
-        out.push(Draw::Path { segs, fill: if closed { fill } else { None }, stroke, stroke_width: width, dash: extra.dash.pattern(width) });
+        out.push(Draw::Path {
+            segs,
+            fill: if closed { fill } else { None },
+            fill_alpha: if closed { extra.fill_opacity() } else { 1.0 },
+            stroke,
+            stroke_width: width,
+            dash: extra.dash.pattern(width),
+        });
         if !closed
             && extra.arrow_end
             && let Some(color) = stroke
@@ -1550,7 +1557,7 @@ fn path_arrowhead(points: &[(f32, f32)], color: Rgb, stroke_width: f32) -> Optio
     let (bx, by) = (tip.0 - dx * len, tip.1 - dy * len);
     let (nx, ny) = (-dy * len * 0.45, dx * len * 0.45);
     let segs = vec![PathSeg::Move(tip.0, tip.1), PathSeg::Line(bx + nx, by + ny), PathSeg::Line(bx - nx, by - ny), PathSeg::Close];
-    Some(Draw::Path { segs, fill: Some(color), stroke: None, stroke_width: 0.0, dash: Vec::new() })
+    Some(Draw::Path { segs, fill: Some(color), fill_alpha: 1.0, stroke: None, stroke_width: 0.0, dash: Vec::new() })
 }
 
 /// A line or connector at `rect` (its unflipped frame: flips are the frame's turn), with its
@@ -1577,7 +1584,7 @@ fn line_draws(
                 })
                 .collect();
             let width = path_stroke_width(stroke_width);
-            out.push(Draw::Path { segs, fill: None, stroke, stroke_width: width, dash: extra.dash.pattern(width) });
+            out.push(Draw::Path { segs, fill: None, fill_alpha: 1.0, stroke, stroke_width: width, dash: extra.dash.pattern(width) });
         }
         None => out.push(Draw::Shape {
             rect,
@@ -1606,7 +1613,7 @@ fn line_draws(
         let (bx, by) = (tip.0 - dx * len, tip.1 - dy * len);
         let (nx, ny) = (-dy * len * 0.45, dx * len * 0.45);
         let segs = vec![PathSeg::Move(tip.0, tip.1), PathSeg::Line(bx + nx, by + ny), PathSeg::Line(bx - nx, by - ny), PathSeg::Close];
-        out.push(Draw::Path { segs, fill: Some(color), stroke: None, stroke_width: 0.0, dash: Vec::new() });
+        out.push(Draw::Path { segs, fill: Some(color), fill_alpha: 1.0, stroke: None, stroke_width: 0.0, dash: Vec::new() });
     }
 }
 
@@ -1915,3 +1922,7 @@ fn upright_east_asian(items: Vec<Draw>) -> Vec<Draw> {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "fill_alpha_tests.rs"]
+mod fill_alpha_tests;
