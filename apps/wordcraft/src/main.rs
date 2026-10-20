@@ -188,18 +188,6 @@ fn saved_window() -> Option<WindowGeometry> {
             win.width = win.width.min(1440.0).min((mon_w - 40.0).max(760.0)).max(760.0);
             win.height = win.height.min(920.0).min((mon_h - 80.0).max(480.0)).max(480.0);
         }
-        // If the window position extends beyond this monitor's bounds, pull it back on screen.
-        if let Some([x, y]) = win.position {
-            if x >= 0.0 && x < mon_w && x + win.width > mon_w {
-                let clamped_x = (mon_w - win.width).max(0.0) / 2.0;
-                win.position = Some([clamped_x, y]);
-            }
-            if y >= 0.0 && y < mon_h && y + win.height > mon_h {
-                let cur_x = win.position.map_or(x, |p| p[0]);
-                let clamped_y = (mon_h - win.height).max(0.0) / 2.0;
-                win.position = Some([cur_x, clamped_y]);
-            }
-        }
     }
     Some(win)
 }
