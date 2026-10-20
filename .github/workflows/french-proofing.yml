@@ -5,6 +5,7 @@ on:
     paths:
       - 'Cargo*'
       - 'crates/proof/**'
+      - 'assets/hyphenation/fr.pat'
       - 'crates/engine/src/cmd/review.rs'
       - 'crates/engine/src/tests.rs'
       - 'docs/french-proofing.md'
@@ -15,6 +16,7 @@ on:
     paths:
       - 'Cargo*'
       - 'crates/proof/**'
+      - 'assets/hyphenation/fr.pat'
       - 'crates/engine/src/cmd/review.rs'
       - 'crates/engine/src/tests.rs'
       - 'docs/french-proofing.md'
