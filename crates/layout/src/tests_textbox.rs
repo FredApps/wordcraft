@@ -490,3 +490,71 @@ fn move_preview_keeps_text_angle() {
         }
     }
 }
+
+/// Fractional page-relative geometry whose vertical turn loses bits through delta translation.
+fn vertical_spun_doc(direction: TextDirection) -> (Document, u32) {
+    let mut document = Document::from_text("Body");
+    let id = turned_box(&mut document, 30.0, false, false);
+    document.last_section.text_direction = direction;
+    let p = document.para_mut(StoryRef::Body, &Path::top(0)).unwrap();
+    let InlineObject::Shape { float, w, h, .. } = p.objects.last_mut().unwrap() else { panic!() };
+    *w = 151.3;
+    *h = 54.2;
+    float.wrap = Wrap::InFrontOfText;
+    float.h_rel = wordcraft_doc::para::Anchor::Page;
+    float.v_rel = wordcraft_doc::para::Anchor::Page;
+    float.x = 299.6;
+    float.y = 411.9;
+    (document, id)
+}
+
+#[test]
+fn vertical_spun_frames() {
+    for direction in [TextDirection::Down, TextDirection::Up] {
+        let (document, id) = vertical_spun_doc(direction);
+        let layout = lay(&document);
+        let object = layout.find_object(0, |o| o.text_box == Some(id)).unwrap();
+        let frames: Vec<_> = layout.pages[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Placed::Spun { part, rect, .. } if *part == id => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames, vec![object.rect; 2], "{direction:?}: both markers use the object's canonical frame");
+    }
+}
+
+#[test]
+fn vertical_spun_hit() {
+    for direction in [TextDirection::Down, TextDirection::Up] {
+        let (document, id) = vertical_spun_doc(direction);
+        let layout = lay(&document);
+        let object = layout.find_object(0, |o| o.text_box == Some(id)).unwrap();
+        let story = StoryRef::Part(id);
+        let pos = |off| Pos { story, path: Path::top(0), off };
+        let (a, b) = (layout.caret_on(&pos(13), 0).unwrap(), layout.caret_on(&pos(14), 0).unwrap());
+        let (x, y) = Spin::new(30.0, false, false).apply(
+            object.rect.x + object.rect.w / 2.0,
+            object.rect.y + object.rect.h / 2.0,
+            a.x + (b.x - a.x) * 0.25,
+            a.top + a.height / 2.0,
+        );
+        assert_eq!(layout.hit_shown(0, x, y, story, None).map(|p| p.off), Some(13), "{direction:?}: actual turned character");
+    }
+}
+
+#[test]
+fn vertical_spun_preview() {
+    for direction in [TextDirection::Down, TextDirection::Up] {
+        let (document, id) = vertical_spun_doc(direction);
+        let layout = lay(&document);
+        let page = &layout.pages[0];
+        let object = layout.find_object(0, |o| o.text_box == Some(id)).unwrap();
+        let source = document.para_at(&object.pos()).unwrap().object_at(object.off).unwrap();
+        let options = display::DisplayOptions::default();
+        let preview = display::object_display(&document, page, source, object.rect, object.text_box, &options);
+        assert_eq!(glyph_turns(&preview), glyph_turns(&display::page_display(&document, page, &options)), "{direction:?}");
+    }
+}

@@ -1231,10 +1231,9 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             // Render before placing the page: a page re-rendered in this frame (a zoom step, an
             // edit) then sits on the pixel grid in this frame too, rather than a frame later.
             if visible && !tiled && !fresh && (forced || rendered < 2 || !app.canvas.textures.contains_key(&i) && rendered < 4) {
-                let mut opts = page_render_options(app, dim_body);
+                let mut opts = page_render_options(app, &layout, dim_body);
                 // Only on the page it is on: the `Pos` can't match an object of another page.
                 opts.display.hide_object = hidden.as_ref().filter(|(page, _)| *page == i).map(|(_, p)| p.clone());
-                opts.display.straight = straight_box(app, &layout);
                 let img = wordcraft_render::render_page(&app.session.doc, page, scale_px, &opts);
                 let ci = page_image(&img);
                 match app.canvas.textures.get_mut(&i) {
@@ -1288,8 +1287,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                     visible_tile_keys.insert(id);
                     let fresh = app.canvas.tiles.get(&id).is_some_and(|(k, _)| *k == key);
                     if !fresh && rendered < 4 {
-                        let mut opts = page_render_options(app, dim_body);
-                        opts.display.straight = straight_box(app, &layout);
+                        let mut opts = page_render_options(app, &layout, dim_body);
                         // Only on the page it is on: the `Pos` can't match an object of another page.
                         opts.display.hide_object = hidden.as_ref().filter(|(page, _)| *page == i).map(|(_, p)| p.clone());
                         // The tiny subtraction avoids a 1px overshoot from round-tripping f32
@@ -3319,7 +3317,7 @@ fn field_showing_code(app: &WordApp, pos: &wordcraft_doc::Pos) -> Option<wordcra
 }
 
 /// Render options for this view's page rasters: marks, markup, dark page, header/body dimming.
-fn page_render_options(app: &WordApp, dim_body: bool) -> wordcraft_render::RenderOptions {
+fn page_render_options(app: &WordApp, layout: &DocLayout, dim_body: bool) -> wordcraft_render::RenderOptions {
     let mut opts = screen_render_options();
     opts.display.marks = app.session.view.marks;
     opts.display.always = app.session.prefs.marks;
@@ -3332,6 +3330,7 @@ fn page_render_options(app: &WordApp, dim_body: bool) -> wordcraft_render::Rende
     opts.dark_paper = wordcraft_render::DARK_PAPER;
     opts.display.dim_header = !dim_body;
     opts.display.dim_body = dim_body;
+    opts.display.straight = straight_box(app, layout);
     opts
 }
 
@@ -3361,7 +3360,7 @@ fn caret_color_at(app: &mut WordApp, layout: &std::sync::Arc<DocLayout>, page: u
         return c;
     }
     let Some(p) = layout.pages.get(page) else { return Color32::BLACK };
-    let bg = wordcraft_render::background_at(&app.session.doc, p, &page_render_options(app, dim_body), x, y);
+    let bg = wordcraft_render::background_at(&app.session.doc, p, &page_render_options(app, layout, dim_body), x, y);
     let c = caret_contrast(bg);
     app.canvas.caret_bg = Some((key, c));
     c
@@ -3469,7 +3468,7 @@ mod tests {
                 let layout = app.session.layout();
                 for dark in [false, true] {
                     app.session.view.dark_mode = dark;
-                    let opts = page_render_options(&app, dims_body(&app, &layout));
+                    let opts = page_render_options(&app, &layout, dims_body(&app, &layout));
                     let draws = page_display(&app.session.doc, &layout.pages[0], &opts.display);
                     for marker in ["Body", "Note", "Header"] {
                         let alphas: Vec<f32> = draws
@@ -3704,6 +3703,47 @@ mod tests {
         assert_eq!(at(&mut a, 2), Color32::WHITE, "inside a black highlight");
         assert_eq!(at(&mut a, 9), Color32::BLACK, "past it");
         assert_eq!(at(&mut a, 2), Color32::WHITE, "again, from the cache");
+    }
+
+    #[test]
+    fn caret_in_straight_box() {
+        use wordcraft_doc::para::{Float, InlineObject, ShapeKind, Wrap};
+        use wordcraft_doc::props::Rgb;
+        use wordcraft_doc::{Document, Paragraph, Path, TextBody, para_block};
+        let mut doc = Document::from_text("Host");
+        let id = doc.add_part(PartKind::TextBox, vec![para_block(Paragraph::with_text("Text", Default::default()))]);
+        doc.parts.get_mut(&id).unwrap().body = TextBody::default();
+        doc.insert_object(
+            &Pos::body(0, 0),
+            InlineObject::Shape {
+                kind: ShapeKind::TextBox,
+                w: 180.0,
+                h: 60.0,
+                fill: Some(Rgb::BLACK),
+                stroke: None,
+                stroke_width: 0.0,
+                float: Float { wrap: Wrap::InFrontOfText, rot: 90.0, ..Default::default() },
+                story: Some(id),
+                effects: Default::default(),
+                freeform: None,
+                extra: Default::default(),
+            },
+            &Default::default(),
+        )
+        .unwrap();
+        let mut app = WordApp::new(wordcraft_engine::Session::new(doc), Default::default());
+        app.session.sel = wordcraft_engine::Selection::caret(Pos { story: StoryRef::Part(id), path: Path::top(0), off: 0 });
+        let layout = app.session.layout();
+        let object = layout.text_box(id, 0).unwrap();
+        let (x, y) = (object.rect.x + 5.0, object.rect.y + 5.0);
+        let mut turned = screen_render_options();
+        turned.display.dim_header = true;
+        assert_eq!(wordcraft_render::background_at(&app.session.doc, &layout.pages[0], &turned, x, y), Rgb::WHITE);
+        let mut opts = turned.clone();
+        opts.display.straight = Some(id);
+        assert_eq!(wordcraft_render::background_at(&app.session.doc, &layout.pages[0], &opts, x, y), Rgb::BLACK);
+        let view = view_key(&app, false, None, straight_box(&app, &layout));
+        assert_eq!(caret_color_at(&mut app, &layout, 0, x, y, view, false), Color32::WHITE);
     }
 
     /// #299: the caret's colour is worked out only when the caret is drawn: with text selected

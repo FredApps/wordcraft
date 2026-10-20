@@ -2066,3 +2066,65 @@ fn nested_spun_text_keeps_tags() {
     assert!(marked >= 4, "all four source paragraphs are tagged");
     assert_eq!(spun_raw.matches("/MCID").count(), marked, "nested rotated glyphs keep their paragraph MCIDs");
 }
+
+#[test]
+fn spun_mixed_roles() {
+    use wordcraft_doc::graphic::{Graphic, GraphicItem, GraphicKind, TextAlign};
+    use wordcraft_doc::props::{Rgb, Underline};
+    use wordcraft_doc::{Path, Pos, StoryRef};
+    for nested in [None, Some(35.0)] {
+        let mut doc = linked_spun_doc(nested);
+        let id = *doc
+            .parts
+            .iter()
+            .find(|(_, part)| part.blocks.iter().any(|b| matches!(b.as_ref(), Block::Para(p) if p.text.contains("Linked words"))))
+            .unwrap()
+            .0;
+        let at = Pos { story: StoryRef::Part(id), path: Path::top(0), off: 0 };
+        let media = doc.add_media(png(), "png");
+        let image =
+            InlineObject::Image { media, w: 16.0, h: 8.0, alt: "Original gradient".into(), float: Default::default(), crop: [0.0; 4], ole: None };
+        doc.insert_object(&at, image, &Default::default()).unwrap();
+        let graphic = Graphic {
+            kind: GraphicKind::Chart,
+            items: vec![GraphicItem::Text {
+                rect: [0.0, 0.0, 40.0, 12.0],
+                text: "Q1".into(),
+                size: 10.0,
+                color: Rgb::BLACK,
+                bold: false,
+                align: TextAlign::Center,
+                font: None,
+            }],
+            ..Default::default()
+        };
+        doc.insert_object(
+            &at,
+            InlineObject::Graphic { w: 40.0, h: 16.0, alt: "Original chart".into(), float: Default::default(), graphic: Arc::new(graphic) },
+            &Default::default(),
+        )
+        .unwrap();
+        let p = doc.para_mut(at.story, &at.path).unwrap();
+        for run in &mut p.runs {
+            run.props.underline = Some(Underline::Single);
+        }
+        let lay = layout(&doc, &mut LayoutCache::new(), &LayoutOptions::default());
+        let mut flat = lay.clone();
+        for page in &mut flat.pages {
+            page.items.retain(|p| !matches!(p, Placed::Spun { .. }));
+        }
+        let opts = PdfOptions { compress: false, ..Default::default() };
+        let flat_pdf = export_layout(&doc, &flat, &opts).unwrap();
+        let spun_pdf = export_layout(&doc, &lay, &opts).unwrap();
+        let base = String::from_utf8_lossy(&flat_pdf);
+        let actual = String::from_utf8_lossy(&spun_pdf);
+        for alt in ["/Alt(Original gradient)", "/Alt(Original chart)"] {
+            assert!(base.contains(alt), "flat control: {alt}");
+            assert!(actual.contains(alt), "nested={nested:?}: {alt}");
+        }
+        for role in ["/Figure", "/Artifact", "/MCID"] {
+            assert_eq!(actual.matches(role).count(), base.matches(role).count(), "nested={nested:?}: {role}");
+        }
+        assert_eq!(extract_text(&spun_pdf), extract_text(&flat_pdf));
+    }
+}
