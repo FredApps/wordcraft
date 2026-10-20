@@ -196,7 +196,11 @@ pub(super) fn fit_size(ctx: &mut Ctx, obj: &wordcraft_doc::para::InlineObject, w
         return (w, h);
     }
     let (len, _) = frame(&body, w, h);
-    let Some(items) = measure(ctx, id, len, body.vert, depth) else { return (w, h) };
+    let Some(mut items) = measure(ctx, id, len, body.vert, depth) else { return (w, h) };
+    if direct_parent(ctx, obj, id) {
+        let owners = suppressed_rects(ctx, id, &items);
+        items.retain(|item| !item_owner(item).is_some_and(|owner| owners.contains(&owner)));
+    }
     let [_, top, _, bottom] = body.insets_pt();
     // Word fits the frame to the text and both margins, including a visible outline's width.
     let outline = match obj {
@@ -208,10 +212,10 @@ pub(super) fn fit_size(ctx: &mut Ctx, obj: &wordcraft_doc::para::InlineObject, w
 
 /// The items showing text box `id` in its frame `rect` (page coordinates): its text, or its
 /// share of a linked chain's, cut to what fits, aligned and turned as the box says.
-pub(crate) fn box_items(ctx: &mut Ctx, id: u32, rect: Rect, depth: usize) -> Vec<Placed> {
+pub(crate) fn box_items(ctx: &mut Ctx, id: u32, rect: Rect, depth: usize, parent: Option<&wordcraft_doc::para::InlineObject>) -> Vec<Placed> {
     let body = ctx.doc.parts.get(&id).map(|p| p.body).unwrap_or_default();
     let (len, across) = frame(&body, rect.w, rect.h);
-    let items = match chain_share(ctx, id, depth) {
+    let mut items = match chain_share(ctx, id, depth) {
         Some(items) => items,
         None => {
             if !enter_box(ctx, id) {
@@ -225,7 +229,90 @@ pub(crate) fn box_items(ctx: &mut Ctx, id: u32, rect: Rect, depth: usize) -> Vec
             if body.auto_fit { inner } else { fit_box(inner, across) }
         }
     };
+    if parent.is_some_and(|obj| direct_parent(ctx, obj, id)) {
+        let owners = suppressed_rects(ctx, id, &items);
+        // Preserve the source and hit metadata; these direct rectangles do not paint in Word.
+        items.retain(|item| !matches!(item, Placed::Shape { object: Some(owner), .. } if owners.contains(owner)));
+    }
     place(items, &body, rect, across)
+}
+
+/// The native controls cover direct floating, unlinked boxes with horizontal, top-aligned text.
+fn direct_parent(ctx: &mut Ctx, obj: &wordcraft_doc::para::InlineObject, id: u32) -> bool {
+    use wordcraft_doc::para::{InlineObject, Wrap};
+
+    let InlineObject::Shape { story: Some(owner), float, .. } = obj else { return false };
+    if *owner != id || float.wrap == Wrap::Inline || float.spin() != wordcraft_geom::Spin::default() {
+        return false;
+    }
+    let Some(part) = ctx.doc.parts.get(&id) else { return false };
+    if part.kind != wordcraft_doc::PartKind::TextBox || !part.body.auto_fit || part.body.vert != TextVert::Horz || part.body.anchor != VAlign::Top {
+        return false;
+    }
+    ctx.chains.build(ctx.doc);
+    !ctx.chains.member.contains_key(&id)
+}
+
+fn item_owner(item: &Placed) -> Option<wordcraft_doc::Pos> {
+    match item {
+        Placed::Shape { object, .. } => object.clone(),
+        Placed::Object { story, path, off, .. } => Some(wordcraft_doc::Pos::new(*story, path.clone(), *off)),
+        _ => None,
+    }
+}
+
+/// Match source markers once per direct paragraph, then require both paint and hit ownership.
+fn suppressed_rects(ctx: &Ctx, id: u32, items: &[Placed]) -> BTreeSet<wordcraft_doc::Pos> {
+    use wordcraft_doc::para::{Anchor, InlineObject, ShapeKind, Wrap};
+
+    let mut paths = BTreeSet::new();
+    for item in items {
+        if let Some(owner) = item_owner(item)
+            && owner.story == StoryRef::Part(id)
+            && owner.path.0.len() == 1
+        {
+            paths.insert(owner.path);
+        }
+    }
+    let mut eligible = BTreeSet::new();
+    for path in paths {
+        let Some(p) = ctx.doc.para(StoryRef::Part(id), &path) else { continue };
+        if p.text.chars().filter(|c| *c == wordcraft_doc::para::OBJ).count() != p.objects.len() {
+            continue;
+        }
+        for ((off, _), object) in p.text.char_indices().filter(|(_, c)| *c == wordcraft_doc::para::OBJ).zip(&p.objects) {
+            let InlineObject::Shape { kind: ShapeKind::Rectangle, story: None, freeform: None, effects, stroke: None, float, .. } = object else {
+                continue;
+            };
+            if *effects != Default::default()
+                || float.spin() != wordcraft_geom::Spin::default()
+                || !matches!(float.wrap, Wrap::InFrontOfText | Wrap::BehindText | Wrap::Square)
+                || float.h_rel != Anchor::Column
+                || float.v_rel != Anchor::Paragraph
+                || float.h_align.is_some()
+                || float.v_align.is_some()
+            {
+                continue;
+            }
+            eligible.insert(wordcraft_doc::Pos::new(StoryRef::Part(id), path.clone(), off));
+        }
+    }
+    let mut painted = BTreeSet::new();
+    let mut hits = BTreeSet::new();
+    for item in items {
+        let Some(owner) = item_owner(item).filter(|owner| eligible.contains(owner)) else { continue };
+        match item {
+            Placed::Shape { .. } => {
+                painted.insert(owner);
+            }
+            Placed::Object { .. } => {
+                hits.insert(owner);
+            }
+            _ => {}
+        }
+    }
+    painted.retain(|owner| hits.contains(owner));
+    painted
 }
 
 /// The height of a `w` wide text box `id` that resizes to fit its text (`a:spAutoFit`): its text's
@@ -779,5 +866,406 @@ mod probe_work_tests {
                 );
             });
         }
+    }
+    #[test]
+    fn suppressed_owner_identity() {
+        let mut d = Document::from_text("");
+        let root = d.add_part(PartKind::TextBox, vec![para_block(Paragraph::with_text("Owner", Default::default()))]);
+        let mut object = shape(root, 40.0);
+        if let InlineObject::Shape { kind, story, h, float, fill, .. } = &mut object {
+            *kind = ShapeKind::Rectangle;
+            *story = None;
+            *h = 10.0;
+            *fill = Some(wordcraft_doc::props::Rgb(19, 47, 83));
+            float.h_rel = wordcraft_doc::para::Anchor::Column;
+            float.v_rel = wordcraft_doc::para::Anchor::Paragraph;
+        }
+        let owner = Pos::new(StoryRef::Part(root), Path::top(0), 0);
+        d.insert_object(&owner, object, &Default::default()).unwrap();
+        with_probe_ctx(&d, |ctx| {
+            let blocks = &d.parts.get(&root).unwrap().blocks;
+            assert!(ctx.boxes.enter(root));
+            let items = lay(ctx, root, blocks, 180.0, TextVert::Horz, 0);
+            ctx.boxes.leave();
+            assert_eq!(suppressed_rects(ctx, root, &items), BTreeSet::from([owner.clone()]));
+            let no_hit: Vec<_> = items.iter().filter(|item| !matches!(item, Placed::Object { .. })).cloned().collect();
+            assert!(suppressed_rects(ctx, root, &no_hit).is_empty());
+            let no_paint: Vec<_> = items.iter().filter(|item| !matches!(item, Placed::Shape { .. })).cloned().collect();
+            assert!(suppressed_rects(ctx, root, &no_paint).is_empty());
+            for foreign in [Pos::body(0, 0), Pos::new(owner.story, Path::top(1), 0), Pos::new(owner.story, owner.path.clone(), 1)] {
+                let mut changed = items.clone();
+                for item in &mut changed {
+                    match item {
+                        Placed::Shape { object: Some(pos), .. } => *pos = foreign.clone(),
+                        Placed::Object { story, path, off, .. } => {
+                            *story = foreign.story;
+                            *path = foreign.path.clone();
+                            *off = foreign.off;
+                        }
+                        _ => {}
+                    }
+                }
+                assert!(suppressed_rects(ctx, root, &changed).is_empty(), "{foreign:?}");
+            }
+        });
+        d.para_mut(owner.story, &owner.path).unwrap().objects.push(InlineObject::BookmarkEnd { name: "unmatched".into() });
+        with_probe_ctx(&d, |ctx| {
+            let blocks = &d.parts.get(&root).unwrap().blocks;
+            let items = lay(ctx, root, blocks, 180.0, TextVert::Horz, 0);
+            assert!(suppressed_rects(ctx, root, &items).is_empty(), "malformed marker ownership is not classified");
+        });
+    }
+}
+
+#[cfg(test)]
+mod fitting_policy_tests {
+    use super::*;
+    use wordcraft_doc::para::{Anchor, Float, InlineObject, ShapeKind, Wrap};
+    use wordcraft_doc::props::{LineSpacing, Rgb};
+    use wordcraft_doc::{Document, Paragraph, PartKind, Pos, para_block};
+
+    const FRAME_WIDTH: f32 = 180.0;
+    const SAVED_HEIGHT: f32 = 80.0;
+    const LINE_HEIGHT: f32 = 16.0;
+    const CHILD_COLOR: Rgb = Rgb(25, 73, 137);
+
+    fn paragraph() -> Paragraph {
+        let mut p = Paragraph::with_text("Parent", Default::default());
+        p.props.line_spacing = Some(LineSpacing::Exactly(LINE_HEIGHT));
+        p.props.space_before = Some(0.0);
+        p.props.space_after = Some(0.0);
+        p
+    }
+
+    fn rectangle(wrap: Wrap, y: f32) -> InlineObject {
+        InlineObject::Shape {
+            kind: ShapeKind::Rectangle,
+            w: 40.0,
+            h: 10.0,
+            fill: Some(CHILD_COLOR),
+            stroke: None,
+            stroke_width: 0.0,
+            float: Float { wrap, h_rel: Anchor::Column, v_rel: Anchor::Paragraph, y, ..Default::default() },
+            story: None,
+            effects: Default::default(),
+            freeform: None,
+            extra: Default::default(),
+        }
+    }
+
+    fn policy_doc(child: Option<InlineObject>) -> (Document, u32) {
+        let mut d = Document::from_text("");
+        d.styles.default_chr.font = Some("Arial".into());
+        d.styles.default_chr.size = Some(10.0);
+        let root = d.add_part(PartKind::TextBox, vec![para_block(paragraph())]);
+        d.parts.get_mut(&root).unwrap().body = TextBody { auto_fit: true, inset: Some([0; 4]), ..Default::default() };
+        if let Some(child) = child {
+            d.insert_object(&Pos::new(StoryRef::Part(root), Path::top(0), 0), child, &Default::default()).unwrap();
+        }
+        let parent = InlineObject::Shape {
+            kind: ShapeKind::TextBox,
+            w: FRAME_WIDTH,
+            h: SAVED_HEIGHT,
+            fill: Some(Rgb(240, 248, 240)),
+            stroke: Some(Rgb(192, 0, 0)),
+            stroke_width: 1.0,
+            float: Float { wrap: Wrap::InFrontOfText, h_rel: Anchor::Page, v_rel: Anchor::Page, x: 72.0, y: 100.0, ..Default::default() },
+            story: Some(root),
+            effects: Default::default(),
+            freeform: None,
+            extra: Default::default(),
+        };
+        d.insert_object(&Pos::body(0, 0), parent, &Default::default()).unwrap();
+        (d, root)
+    }
+
+    fn lay(d: &Document) -> crate::DocLayout {
+        crate::layout(d, &mut crate::LayoutCache::new(), &crate::LayoutOptions::default())
+    }
+
+    fn frame(l: &crate::DocLayout, root: u32) -> Rect {
+        l.pages
+            .iter()
+            .flat_map(|p| &p.items)
+            .find_map(|it| match it {
+                Placed::Object { rect, text_box: Some(id), .. } if *id == root => Some(*rect),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn paint(l: &crate::DocLayout, owner: &Pos) -> usize {
+        l.pages.iter().flat_map(|p| &p.items).filter(|item| matches!(item, Placed::Shape { object: Some(pos), .. } if pos == owner)).count()
+    }
+
+    fn child_draws(draws: &[crate::display::Draw]) -> usize {
+        use crate::display::Draw;
+        draws
+            .iter()
+            .map(|draw| match draw {
+                Draw::Shape { fill: Some(color), .. } if *color == CHILD_COLOR => 1,
+                Draw::Rotated { items, .. } | Draw::Turned { items, .. } | Draw::Clip { items, .. } => child_draws(items),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn draws(d: &Document, l: &crate::DocLayout) -> usize {
+        l.pages.iter().map(|p| child_draws(&crate::display::page_display(d, p, &Default::default()))).sum()
+    }
+
+    #[test]
+    fn floating_rect_height() {
+        let mut observed = Vec::new();
+        for wrap in [Wrap::InFrontOfText, Wrap::BehindText] {
+            for y in [0.0, 12.0, 500.0] {
+                let (d, root) = policy_doc(Some(rectangle(wrap, y)));
+                let l = lay(&d);
+                observed.push((wrap, y, frame(&l, root).h));
+            }
+        }
+        eprintln!("FLOAT_PARENT_HEIGHT {observed:?}");
+        assert!(observed.iter().all(|(_, _, h)| (*h - 17.0).abs() < 0.01), "{observed:?}");
+    }
+
+    #[test]
+    fn floating_rect_paint() {
+        let mut observed = Vec::new();
+        for wrap in [Wrap::InFrontOfText, Wrap::BehindText] {
+            for y in [0.0, 12.0, 500.0] {
+                let (d, root) = policy_doc(Some(rectangle(wrap, y)));
+                let l = lay(&d);
+                let owner = Pos::new(StoryRef::Part(root), Path::top(0), 0);
+                let hits = l
+                    .pages
+                    .iter()
+                    .flat_map(|p| &p.items)
+                    .filter(|item| {
+                        matches!(item,
+                    Placed::Object { story, path, off, .. } if *story == owner.story && *path == owner.path && *off == owner.off)
+                    })
+                    .count();
+                assert_eq!(hits, 1, "source object remains selectable");
+                assert_eq!(d.para(owner.story, &owner.path).unwrap().objects.len(), 1);
+                observed.push((wrap, y, paint(&l, &owner), draws(&d, &l)));
+            }
+        }
+        eprintln!("FLOAT_PARENT_PAINT {observed:?}");
+        assert!(observed.iter().all(|(_, _, placed, draw)| *placed == 0 && *draw == 0), "{observed:?}");
+    }
+
+    #[test]
+    fn square_keeps_flow() {
+        let mut child = rectangle(Wrap::Square, 0.0);
+        if let InlineObject::Shape { w, h, .. } = &mut child {
+            *w = 170.0;
+            *h = 40.0;
+        }
+        let (d, root) = policy_doc(Some(child));
+        let l = lay(&d);
+        let r = frame(&l, root);
+        let top = l
+            .pages
+            .iter()
+            .flat_map(|p| &p.items)
+            .find_map(|it| match it {
+                Placed::Lines { story: StoryRef::Part(id), y, .. } if *id == root => Some(*y),
+                _ => None,
+            })
+            .unwrap();
+        eprintln!("SQUARE_FRAME {r:?} text_top={top} paint={}", draws(&d, &l));
+        assert!((r.h - 57.0).abs() < 0.01, "{r:?}");
+        assert!((top - r.y - 40.0).abs() < 0.01, "wrapping displacement survives");
+        assert_eq!(draws(&d, &l), 0);
+    }
+
+    #[test]
+    fn plain_and_inline_keep_flow() {
+        let (d, root) = policy_doc(None);
+        assert!((frame(&lay(&d), root).h - 17.0).abs() < 0.01);
+        let image = InlineObject::Image {
+            media: "original-policy-control".into(),
+            w: 40.0,
+            h: 100.0,
+            alt: String::new(),
+            float: Default::default(),
+            crop: [0.0; 4],
+            ole: None,
+        };
+        let (mut d, root) = policy_doc(Some(image));
+        d.para_mut(StoryRef::Part(root), &Path::top(0)).unwrap().props.line_spacing = Some(LineSpacing::AtLeast(LINE_HEIGHT));
+        let l = lay(&d);
+        let h = frame(&l, root).h;
+        let owner = Pos::new(StoryRef::Part(root), Path::top(0), 0);
+        let objects: Vec<_> = l
+            .pages
+            .iter()
+            .flat_map(|p| &p.items)
+            .filter_map(|it| match it {
+                Placed::Object { story, path, off, rect, .. } if *story == owner.story && *path == owner.path && *off == 0 => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        eprintln!("MODEL_TALL_INLINE height={h} hits={objects:?}");
+        assert!((101.0..110.0).contains(&h), "{h}");
+        assert_eq!(objects.len(), 1);
+        assert_eq!((objects[0].w, objects[0].h), (40.0, 100.0));
+        let root_lines: Vec<_> = l
+            .pages
+            .iter()
+            .flat_map(|p| &p.items)
+            .filter_map(|it| match it {
+                Placed::Lines { story: StoryRef::Part(id), para, l0, l1, .. } if *id == root => Some((para, l0, l1)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(root_lines.len(), 1);
+        assert!(root_lines[0].0.clusters.iter().any(|c| matches!(c.kind, crate::para::ClKind::Object(0))));
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum OtherChild {
+        Ellipse,
+        Outline,
+        Effect,
+        Turn,
+        Flip,
+        TopBottom,
+        Tight,
+        PageAnchor,
+        TextBox,
+    }
+
+    #[test]
+    fn other_children_keep_paint() {
+        for case in [
+            OtherChild::Ellipse,
+            OtherChild::Outline,
+            OtherChild::Effect,
+            OtherChild::Turn,
+            OtherChild::Flip,
+            OtherChild::TopBottom,
+            OtherChild::Tight,
+            OtherChild::PageAnchor,
+            OtherChild::TextBox,
+        ] {
+            let (mut d, root) = policy_doc(Some(rectangle(Wrap::InFrontOfText, 500.0)));
+            let nested = d.add_part(PartKind::TextBox, vec![para_block(paragraph())]);
+            let child = d.para_mut(StoryRef::Part(root), &Path::top(0)).unwrap().object_at_mut(0).unwrap();
+            if let InlineObject::Shape { kind, stroke, effects, float, story, .. } = child {
+                match case {
+                    OtherChild::Ellipse => *kind = ShapeKind::Ellipse,
+                    OtherChild::Outline => *stroke = Some(CHILD_COLOR),
+                    OtherChild::Effect => effects.soft_edge = Some(1.0),
+                    OtherChild::Turn => float.rot = 15.0,
+                    OtherChild::Flip => float.flip_h = true,
+                    OtherChild::TopBottom => float.wrap = Wrap::TopAndBottom,
+                    OtherChild::Tight => float.wrap = Wrap::Tight,
+                    OtherChild::PageAnchor => float.v_rel = Anchor::Page,
+                    OtherChild::TextBox => {
+                        *kind = ShapeKind::TextBox;
+                        *story = Some(nested);
+                    }
+                }
+            }
+            let l = lay(&d);
+            assert_eq!(paint(&l, &Pos::new(StoryRef::Part(root), Path::top(0), 0)), 1, "{case:?}");
+            assert!(draws(&d, &l) > 0, "{case:?}");
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum OtherParent {
+        Fixed,
+        Inline,
+        Turned,
+        Center,
+        Bottom,
+        Linked,
+    }
+
+    #[test]
+    fn other_parents_keep_paint() {
+        for case in [OtherParent::Fixed, OtherParent::Inline, OtherParent::Turned, OtherParent::Center, OtherParent::Bottom, OtherParent::Linked] {
+            // The child is inside the saved frame, so fixed/linked clipping is not the policy under test.
+            let (mut d, root) = policy_doc(Some(rectangle(Wrap::InFrontOfText, 0.0)));
+            let tail = d.add_part(PartKind::TextBox, vec![para_block(paragraph())]);
+            match case {
+                OtherParent::Fixed => d.parts.get_mut(&root).unwrap().body.auto_fit = false,
+                OtherParent::Inline => {
+                    if let InlineObject::Shape { float, .. } = d.para_mut(StoryRef::Body, &Path::top(0)).unwrap().object_at_mut(0).unwrap() {
+                        float.wrap = Wrap::Inline;
+                    }
+                }
+                OtherParent::Turned => d.parts.get_mut(&root).unwrap().body.vert = TextVert::Vert,
+                OtherParent::Center => d.parts.get_mut(&root).unwrap().body.anchor = VAlign::Center,
+                OtherParent::Bottom => d.parts.get_mut(&root).unwrap().body.anchor = VAlign::Bottom,
+                OtherParent::Linked => d.parts.get_mut(&root).unwrap().body.next = Some(tail),
+            }
+            let l = lay(&d);
+            assert_eq!(paint(&l, &Pos::new(StoryRef::Part(root), Path::top(0), 0)), 1, "{case:?}");
+            assert!(draws(&d, &l) > 0, "{case:?}");
+        }
+    }
+
+    #[test]
+    fn same_rect_distinct_owners() {
+        let (mut d, root) = policy_doc(Some(rectangle(Wrap::InFrontOfText, 500.0)));
+        let mut other = rectangle(Wrap::InFrontOfText, 500.0);
+        if let InlineObject::Shape { kind, .. } = &mut other {
+            *kind = ShapeKind::Ellipse;
+        }
+        let off = d.para(StoryRef::Part(root), &Path::top(0)).unwrap().len();
+        d.insert_object(&Pos::new(StoryRef::Part(root), Path::top(0), off), other, &Default::default()).unwrap();
+        let l = lay(&d);
+        assert_eq!(paint(&l, &Pos::new(StoryRef::Part(root), Path::top(0), 0)), 0);
+        assert_eq!(paint(&l, &Pos::new(StoryRef::Part(root), Path::top(0), off)), 1);
+        assert_eq!(draws(&d, &l), 1);
+        assert_eq!(d.para(StoryRef::Part(root), &Path::top(0)).unwrap().objects.len(), 2);
+    }
+
+    #[test]
+    fn table_child_keeps_paint() {
+        let (mut d, root) = policy_doc(None);
+        let mut p = paragraph();
+        p.text.insert(0, wordcraft_doc::para::OBJ);
+        p.runs[0].len += wordcraft_doc::para::OBJ.len_utf8();
+        p.objects.push(rectangle(Wrap::InFrontOfText, 0.0));
+        let mut t = wordcraft_doc::Table::new(1, 1, FRAME_WIDTH);
+        t.rows[0].cells[0].blocks = vec![para_block(p)];
+        d.parts.get_mut(&root).unwrap().blocks.push(Arc::new(Block::Table(t)));
+        let l = lay(&d);
+        let owners: Vec<_> = l
+            .pages
+            .iter()
+            .flat_map(|p| &p.items)
+            .filter_map(|it| match it {
+                Placed::Shape { object: Some(owner), .. } if owner.story == StoryRef::Part(root) => Some(owner),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(owners.len(), 1);
+        assert!(owners[0].path.0.len() > 1);
+        assert_eq!(draws(&d, &l), 1);
+    }
+
+    #[test]
+    fn inset_and_color_are_not_keys() {
+        let (mut d, root) = policy_doc(Some(rectangle(Wrap::BehindText, 123.0)));
+        d.parts.get_mut(&root).unwrap().body.inset = Some([12700; 4]);
+        let child = d.para_mut(StoryRef::Part(root), &Path::top(0)).unwrap().object_at_mut(0).unwrap();
+        if let InlineObject::Shape { fill, w, h, .. } = child {
+            *fill = Some(Rgb(107, 31, 48));
+            *w = 53.0;
+            *h = 19.0;
+        }
+        let parent = d.para_mut(StoryRef::Body, &Path::top(0)).unwrap().object_at_mut(0).unwrap();
+        if let InlineObject::Shape { w, h, .. } = parent {
+            *w = 230.0;
+            *h = 120.0;
+        }
+        let l = lay(&d);
+        assert!((frame(&l, root).h - 19.0).abs() < 0.01);
+        assert_eq!(paint(&l, &Pos::new(StoryRef::Part(root), Path::top(0), 0)), 0);
     }
 }

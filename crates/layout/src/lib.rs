@@ -3312,7 +3312,8 @@ fn place_objects(
                 _ => text_box.map(|id| (id, rect)).into_iter().collect(),
             };
             for (id, rect) in boxes {
-                let items = textbox::box_items(ctx, id, rect, depth);
+                let parent = if text_box == Some(id) { Some(obj) } else { None };
+                let items = textbox::box_items(ctx, id, rect, depth, parent);
                 let layer = if float.wrap == Wrap::BehindText { &mut behind } else { &mut front };
                 layer.extend(items);
             }
