@@ -1,6 +1,6 @@
 # Shipping and improving French proofing
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (French dictionary recovery and regional labels); previously trivial (French hyphenation CI path coverage); previously minor (historical affix compatibility gates and pinned French CI toolchain); previously major (French integration and regression gates, based on #1660)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (French proofing region parser respects extension boundaries); previously minor (French dictionary recovery and regional labels); previously trivial (French hyphenation CI path coverage); previously minor (historical affix compatibility gates and pinned French CI toolchain); previously major (French integration and regression gates, based on #1660)
 
 ## Shared-engine compatibility and reproducible CI
 
@@ -25,6 +25,10 @@ The baseline includes spelling, accent and apostrophe suggestions, conservative 
 and grammar, and hyphenation. `fr-CA` shares spelling and uses Quebec punctuation conventions.
 New documents under the French interface take the French system region. Missing and unreadable
 dictionaries are reported through the existing status-bar and Options diagnostics.
+
+Document proofing reads the Canadian region only in its region position, after an optional
+script (`fr-CA`, `fr-Latn-CA`). Extension data such as `fr-u-ca-gregory` and `fr-x-ca`
+does not select Quebec typography.
 
 Subject–verb agreement, gender/number agreement, past participles, conjugation and contextual
 homophones are not checked. No automatic document-wide correction is applied.
@@ -80,6 +84,7 @@ before proposing a suggestion/ranking change. Keep follow-ups independently revi
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | minor | French proofing reads Canada only from the region after the language/optional script; Unicode calendar and private-use extension subtags do not select Quebec typography; production-parser regressions |
 | 2026-10-20 | minor | French dictionary replacement clears stale load errors only after successful parsing; Canadian French keeps its own Options label |
 | 2026-10-20 | trivial | French hyphenation pattern asset included in both workflow path filters so pattern-only changes run the proofing regressions |
 | 2026-10-20 | minor | Frozen pre-French affix outputs and legacy compact dictionaries agree; French CI pins Rust 1.98.1 and checks formatting on all three desktop systems |
