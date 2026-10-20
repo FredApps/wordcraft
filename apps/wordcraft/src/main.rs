@@ -181,7 +181,27 @@ fn saved_window() -> Option<WindowGeometry> {
         return None;
     }
     let bytes = std::fs::read(prefs_path()?).ok()?;
-    UiState::from_json(&bytes)?.window?.sanitized()
+    let mut win = UiState::from_json(&bytes)?.window?.sanitized()?;
+    if let Some([mon_w, mon_h]) = win.monitor {
+        // Clamp window dimensions so it never opens larger than the monitor it was saved on.
+        if win.width > mon_w || win.height > mon_h {
+            win.width = win.width.min(1440.0).min((mon_w - 40.0).max(760.0)).max(760.0);
+            win.height = win.height.min(920.0).min((mon_h - 80.0).max(480.0)).max(480.0);
+        }
+        // If the window position extends beyond this monitor's bounds, pull it back on screen.
+        if let Some([x, y]) = win.position {
+            if x >= 0.0 && x < mon_w && x + win.width > mon_w {
+                let clamped_x = (mon_w - win.width).max(0.0) / 2.0;
+                win.position = Some([clamped_x, y]);
+            }
+            if y >= 0.0 && y < mon_h && y + win.height > mon_h {
+                let cur_x = win.position.map_or(x, |p| p[0]);
+                let clamped_y = (mon_h - win.height).max(0.0) / 2.0;
+                win.position = Some([cur_x, clamped_y]);
+            }
+        }
+    }
+    Some(win)
 }
 
 fn save_prefs(app: &WordApp) {
@@ -232,7 +252,45 @@ fn build_sha() -> &'static str {
     option_env!("WORDCRAFT_BUILD_SHA").map(|s| s.get(..8).unwrap_or(s)).unwrap_or("dev")
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+fn ensure_x11_scale_factor() {
+    if std::env::var_os("DISPLAY").is_some()
+        && std::env::var_os("WORDCRAFT_WAYLAND").is_none()
+        && std::env::var_os("WINIT_X11_SCALE_FACTOR").is_none()
+    {
+        let xft_scale = std::process::Command::new("xrdb").arg("-query").output().ok().and_then(|out| {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                if let Some(rest) = line.strip_prefix("Xft.dpi:")
+                    && let Ok(dpi) = rest.trim().parse::<f64>()
+                    && dpi > 0.0
+                {
+                    return Some((dpi / 96.0).to_string());
+                }
+            }
+            None
+        });
+        let scale = match xft_scale {
+            Some(s) => s,
+            None => match std::env::var("GDK_SCALE") {
+                Ok(s) => s,
+                Err(_) => match std::env::var("QT_SCALE_FACTOR") {
+                    Ok(s) => s,
+                    Err(_) => "1".to_string(),
+                },
+            },
+        };
+        if let Ok(exe) = std::env::current_exe() {
+            use std::os::unix::process::CommandExt;
+            let _ = std::process::Command::new(exe).args(std::env::args_os().skip(1)).env("WINIT_X11_SCALE_FACTOR", scale).exec();
+        }
+    }
+}
+
 fn main() -> eframe::Result {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    ensure_x11_scale_factor();
+
     // First, so the panic hook and every start-up warning are recorded (`logging`).
     let logger = logging::install();
     logging::install_panic_hook();
@@ -345,6 +403,7 @@ fn main() -> eframe::Result {
             for f in files {
                 if let Err(e) = app.run("file.open", serde_json::json!({"path": f})) {
                     log::warn!("{f}: {e}");
+                    app.status(format!("{f}: {e}"));
                 }
             }
             Ok(Box::new(App(
