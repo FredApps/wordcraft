@@ -126,7 +126,8 @@ impl Writer {
                         self.out.push_str(&format!("{indent}\\begin{{{env}}}\n"));
                         if li.ordered && li.start != 1 {
                             const ENUM_COUNTERS: [&str; 4] = ["enumi", "enumii", "enumiii", "enumiv"];
-                            let counter = ENUM_COUNTERS.get(lists.len()).copied().unwrap_or("enumi");
+                            let enum_depth = lists.iter().filter(|(ordered, _)| *ordered).count();
+                            let counter = ENUM_COUNTERS.get(enum_depth).copied().unwrap_or("enumi");
                             let start_val = (li.start as i64) - 1;
                             self.out.push_str(&format!("{indent}  \\setcounter{{{counter}}}{{{start_val}}}\n"));
                         }
@@ -3125,5 +3126,40 @@ Caf\'e na\"ive \c{c}a \v{s}\'{e} and {\bfseries grouped bold} after.
         assert!(tex.contains("\\begin{enumerate}\n  \\setcounter{enumi}{4}"), "expected \\setcounter{{enumi}}{{4}} in:\n{tex}");
         assert!(tex.contains("\\item five"), "expected \\item five in:\n{tex}");
         assert!(tex.contains("\\item six"), "expected \\item six in:\n{tex}");
+
+        // Document with start_overrides on a numbering instance
+        let mut doc2 = wordcraft_doc::Document::from_text("first item\nsecond item");
+        let list_id = doc2.numbering.add_list(wordcraft_doc::numbering::ListKind::Numbered);
+        if let Some(num) = doc2.numbering.nums.iter_mut().find(|x| x.id == list_id) {
+            num.start_overrides = vec![(0, 7)];
+        }
+        for path in doc2.para_paths(wordcraft_doc::StoryRef::Body) {
+            if let Ok(p) = doc2.para_mut(wordcraft_doc::StoryRef::Body, &path) {
+                p.props.numbering = Some(wordcraft_doc::props::NumRef { num: list_id, level: 0 });
+            }
+        }
+        let tex2 = export(&doc2);
+        assert!(tex2.contains("\\begin{enumerate}\n  \\setcounter{enumi}{6}"), "expected start_overrides to export setcounter enumi 6 in:\n{tex2}");
+
+        // Enumerate nested inside itemize should use enumi counter, not enumii
+        let mut flow3 = Flow::default();
+        let bullet = Para {
+            list: Some(ListInfo { ordered: false, level: 0, start: 1 }),
+            inlines: vec![Inline::Text("bullet".into(), Fmt::default())],
+            ..Default::default()
+        };
+        let nested_num = Para {
+            list: Some(ListInfo { ordered: true, level: 1, start: 3 }),
+            inlines: vec![Inline::Text("nested numbered".into(), Fmt::default())],
+            ..Default::default()
+        };
+        flow3.blocks.push(FBlock::Para(bullet));
+        flow3.blocks.push(FBlock::Para(nested_num));
+        let doc3 = crate::model::to_doc(&flow3);
+        let tex3 = export(&doc3);
+        assert!(
+            tex3.contains("\\begin{enumerate}\n    \\setcounter{enumi}{2}"),
+            "expected enumi counter for enumerate nested inside itemize in:\n{tex3}"
+        );
     }
 }

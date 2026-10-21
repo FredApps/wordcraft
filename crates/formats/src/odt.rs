@@ -3400,5 +3400,20 @@ mod tests {
         let bytes = export(&doc).unwrap();
         let xml = String::from_utf8(read_entry(&mut archive(&bytes), "content.xml").unwrap()).unwrap();
         assert!(xml.contains("text:start-value=\"5\""), "expected text:start-value=\"5\" in content.xml:\n{xml}");
+
+        // Document with start_overrides on a numbering instance
+        let mut doc2 = wordcraft_doc::Document::from_text("first item\nsecond item");
+        let list_id = doc2.numbering.add_list(wordcraft_doc::numbering::ListKind::Numbered);
+        if let Some(num) = doc2.numbering.nums.iter_mut().find(|x| x.id == list_id) {
+            num.start_overrides = vec![(0, 7)];
+        }
+        for path in doc2.para_paths(wordcraft_doc::StoryRef::Body) {
+            if let Ok(p) = doc2.para_mut(wordcraft_doc::StoryRef::Body, &path) {
+                p.props.numbering = Some(wordcraft_doc::props::NumRef { num: list_id, level: 0 });
+            }
+        }
+        let bytes2 = export(&doc2).unwrap();
+        let xml2 = String::from_utf8(read_entry(&mut archive(&bytes2), "content.xml").unwrap()).unwrap();
+        assert!(xml2.contains("text:start-value=\"7\""), "expected text:start-value=\"7\" from start_overrides in content.xml:\n{xml2}");
     }
 }
