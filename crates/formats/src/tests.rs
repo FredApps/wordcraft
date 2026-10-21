@@ -179,6 +179,14 @@ fn bullets_then_numbers() -> Document {
 }
 
 #[test]
+fn html_import_keeps_ordered_list_start() {
+    let d = import("html", b"<ol start=\"3\"><li>a</li><li value=\"7\">b</li><li>c</li></ol>").unwrap().unwrap();
+    let b = flat(&d);
+    let start = |t: &str| find_para(&b, t).unwrap().list.unwrap().start;
+    assert_eq!((start("a"), start("b"), start("c")), (3, 7, 8));
+}
+
+#[test]
 fn numbered_list_after_bullets_keeps_its_kind() {
     let d = bullets_then_numbers();
     for ext in ["odt", "rtf"] {

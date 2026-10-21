@@ -629,13 +629,19 @@ impl<'a> Builder<'a> {
                     let mut j = i;
                     let mut group: Vec<ListInfo> = Vec::new();
                     let mut top: Option<bool> = None;
+                    let mut top_start: Option<u32> = None;
                     while let Some(FBlock::Para(q)) = blocks.get(j) {
                         let Some(li) = q.list else { break };
                         if li.level == 0 {
                             if top.is_some_and(|o| o != li.ordered) {
                                 break;
                             }
+                            // A changed start (a per-item value, a new <ol start>) is a new list run.
+                            if li.ordered && top_start.is_some_and(|s| s != li.start) {
+                                break;
+                            }
                             top = Some(li.ordered);
+                            top_start = Some(li.start);
                         }
                         group.push(li);
                         j += 1;
