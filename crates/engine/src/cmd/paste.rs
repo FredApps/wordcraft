@@ -629,10 +629,10 @@ fn insert_inner(s: &mut Session, mut frag: Fragment, source: Option<Fragment>, p
     } else {
         // Formatted paragraphs that state no alignment, indent or spacing take the destination's
         // too: the first paragraph joins the destination's, and the rest must not fall back to
-        // the style while it is centered.
+        // the style while it is centered. Paragraphs inside a table cell keep their own.
+        let d = &dest.1;
         for b in &mut frag.blocks {
-            each_para(b, 0, &mut |p| {
-                let d = &dest.1;
+            if let Block::Para(p) = b {
                 p.props.align = p.props.align.or(d.align);
                 if p.props.numbering.is_none() {
                     p.props.indent_left = p.props.indent_left.or(d.indent_left);
@@ -642,7 +642,8 @@ fn insert_inner(s: &mut Session, mut frag: Fragment, source: Option<Fragment>, p
                 p.props.space_before = p.props.space_before.or(d.space_before);
                 p.props.space_after = p.props.space_after.or(d.space_after);
                 p.props.line_spacing = p.props.line_spacing.or(d.line_spacing);
-            });
+                p.touch();
+            }
         }
     }
     let at = delete_selection(s)?;
@@ -861,6 +862,35 @@ mod tests {
         let source = s.last_paste.as_ref().map(|lp| lp.source.clone()).unwrap();
         let err = fragment_picture(&s, &source).unwrap_err();
         assert!(err.to_string().contains("too long"), "{err}");
+    }
+
+    /// A centered destination gives top-level pasted paragraphs its alignment, but the paragraphs
+    /// inside a pasted table's cells keep their own.
+    #[test]
+    fn table_cell_paragraphs_do_not_take_the_destination_alignment() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("para.alignCenter", &json!({})).unwrap();
+        let html = "<p><b>Top</b></p><table><tr><td>Cell</td></tr></table>";
+        s.run("edit.paste", &json!({"text": "Top\nCell", "html": html})).unwrap();
+        let mut aligns = Vec::new();
+        for b in &s.doc.body {
+            match &**b {
+                Block::Para(p) => aligns.push(("para", p.props.align)),
+                Block::Table(t) => {
+                    for row in &t.rows {
+                        for cell in &row.cells {
+                            for cb in &cell.blocks {
+                                if let Block::Para(p) = &**cb {
+                                    aligns.push(("cell", p.props.align));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(aligns.iter().any(|(k, a)| *k == "para" && *a == Some(wordcraft_doc::Align::Center)), "{aligns:?}");
+        assert!(aligns.iter().filter(|(k, _)| *k == "cell").all(|(_, a)| *a != Some(wordcraft_doc::Align::Center)), "{aligns:?}");
     }
 
     /// Picture at the start of a document puts the paragraph the paste restyled back.

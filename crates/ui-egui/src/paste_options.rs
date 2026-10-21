@@ -71,10 +71,23 @@ impl PasteOptionsUi {
     }
 }
 
-/// Whether the Paste Options offer is showing, so that Escape closes it first and does nothing
+/// Where the button sits (below the caret) while the engine offers paste options and the caret is
+/// in view; `None` when there is no offer, Esc hid it, or the caret is scrolled out of the page
+/// area (under the ribbon or the status bar), where the button must not float over other panes.
+fn button_pos(app: &mut WordApp, ctx: &Context) -> Option<egui::Pos2> {
+    if wordcraft_engine::cmd::paste::paste_options(&app.session).is_empty() || app.paste_options.hidden_rev == Some(app.session.rev()) {
+        return None;
+    }
+    let (caret, height) = crate::canvas::caret_screen(app)?;
+    let at = pos2(caret.x, caret.y + height + 4.0);
+    let view = app.canvas.canvas_rect.unwrap_or_else(|| ctx.content_rect());
+    view.contains_rect(egui::Rect::from_min_size(at, vec2(BUTTON_W + 6.0, BUTTON_H + 6.0))).then_some(at)
+}
+
+/// Whether the Paste Options button is showing, so that Escape closes it first and does nothing
 /// else (it must not also leave full screen).
-pub fn wants_escape(app: &WordApp) -> bool {
-    !wordcraft_engine::cmd::paste::paste_options(&app.session).is_empty() && app.paste_options.hidden_rev != Some(app.session.rev())
+pub fn wants_escape(app: &mut WordApp, ctx: &Context) -> bool {
+    button_pos(app, ctx).is_some()
 }
 
 /// Draw the button below the caret while the engine offers paste options.
@@ -83,10 +96,10 @@ pub fn show(app: &mut WordApp, ctx: &Context) {
 
     let offered = wordcraft_engine::cmd::paste::paste_options(&app.session);
     let rev = app.session.rev();
-    if offered.is_empty() || app.paste_options.hidden_rev == Some(rev) {
+    let Some(at) = button_pos(app, ctx) else {
         app.paste_options.open = false;
         return;
-    }
+    };
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         app.paste_options.hidden_rev = Some(rev);
         app.paste_options.open = false;
@@ -95,17 +108,7 @@ pub fn show(app: &mut WordApp, ctx: &Context) {
     if tapped {
         app.paste_options.open = !app.paste_options.open;
     }
-    let Some((caret, height)) = crate::canvas::caret_screen(app) else { return };
     let t = Tokens::get(ctx);
-    let at = pos2(caret.x, caret.y + height + 4.0);
-    // Scrolled out of the page area (under the ribbon or the status bar): nothing to show, and
-    // the button must not float over other panes.
-    let view = app.canvas.canvas_rect.unwrap_or_else(|| ctx.content_rect());
-    let size = vec2(BUTTON_W + 6.0, BUTTON_H + 6.0);
-    if !view.contains_rect(egui::Rect::from_min_size(at, size)) {
-        app.paste_options.open = false;
-        return;
-    }
     let current = wordcraft_engine::cmd::paste::paste_mode(&app.session);
     let mut chosen = None;
     let mut button_rect = egui::Rect::NOTHING;

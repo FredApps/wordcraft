@@ -731,19 +731,34 @@ fn apply_style(css: &str, f: &mut Fmt, align: &mut Option<Align>, preserve: &mut
                         "italic" | "oblique" => style = "italic",
                         "bold" | "bolder" => weight = "bold",
                         "normal" | "lighter" | "small-caps" => {}
-                        _ if tok.parse::<u32>().is_ok_and(|w| (1..=1000).contains(&w) && tok.len() == 3) => {
+                        _ if tok.parse::<u32>().is_ok_and(|w| (1..=1000).contains(&w)) => {
                             weight = if tok.parse::<u32>().is_ok_and(|w| w >= 600) { "bold" } else { "normal" };
                         }
                         _ if css_len_pt(head).is_some() => {
                             size = css_len_pt(head);
-                            family = after.trim();
+                            // An optional `/ line-height`, with or without spaces around the slash.
+                            let mut tail = after.trim_start();
+                            fn drop_word(t: &str) -> &str {
+                                t.trim_start().split_once(char::is_whitespace).map_or("", |(_, r)| r)
+                            }
+                            if tok.ends_with('/') {
+                                tail = drop_word(tail);
+                            } else if !tok.contains('/')
+                                && let Some(r) = tail.strip_prefix('/')
+                            {
+                                tail = drop_word(r);
+                            }
+                            family = tail.trim();
                             break;
                         }
                         _ => break,
                     }
                     rest = after;
                 }
-                if let Some(pt) = size {
+                // The family is required: `font: 12pt` and `font: 12pt inherit` are invalid, and an
+                // invalid declaration changes nothing.
+                let family_ok = !family.is_empty() && !matches!(family, "inherit" | "initial" | "unset" | "revert");
+                if let Some(pt) = size.filter(|_| family_ok) {
                     // The shorthand sets the family too: an outer span's font or code styling goes.
                     f.code = false;
                     f.font = None;
@@ -1956,6 +1971,27 @@ mod tests {
                 "{css}: {:?}",
                 p.inlines
             );
+        }
+    }
+
+    /// A line-height may have spaces around its slash, any weight 1–1000 is a weight, and a
+    /// shorthand without a family is invalid and changes nothing.
+    #[test]
+    fn font_shorthand_edge_cases() {
+        let para = |css: &str| {
+            let f = parse(&format!("<p><span style=\"{css}\">t</span></p>"));
+            let FBlock::Para(p) = &f.blocks[0] else { panic!() };
+            p.inlines.iter().find_map(|i| if let Inline::Text(_, f) = i { Some(f.clone()) } else { None }).unwrap()
+        };
+        for css in ["font: 12px / 1.4 Arial", "font: 12px /1.4 Arial", "font: 12px/ 1.4 Arial", "font: 12px/1.4 Arial"] {
+            let f = para(css);
+            assert!(f.font.as_deref() == Some("Arial") && f.size == Some(9.0), "{css}: {:?} {:?}", f.font, f.size);
+        }
+        let f = para("font: 1000 12pt Arial");
+        assert!(f.bold && f.size == Some(12.0), "1000 is a weight, not the size");
+        for css in ["font: 12pt", "font: 12pt inherit"] {
+            let f = para(css);
+            assert!(f.size.is_none() && f.font.is_none(), "{css} is invalid and changes nothing");
         }
     }
 
