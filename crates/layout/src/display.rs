@@ -982,7 +982,7 @@ fn lines(
             // the PDF's text. Not for colour glyphs (no outlines), top-to-bottom text with upright
             // characters (their outlines would lie on their side), `#` deletion marks, or WordArt
             // in revision colours.
-            let upright = down && text.chars().any(upright_in_vertical);
+            let upright = down && (rc.vert || text.chars().any(upright_in_vertical));
             let art = (!upright
                 && !glyphs.is_empty()
                 && del_mark != Some(DeleteMark::Hash)
@@ -999,19 +999,46 @@ fn lines(
                 out.push(Draw::Art { path, fx: Box::new(fx), color, alpha, text_bg });
             }
             if !glyphs.is_empty() {
-                out.push(Draw::Glyphs {
-                    face: st.face,
-                    size: st.size,
-                    glyphs,
-                    color,
-                    alpha: if has_art { 0.0 } else { alpha },
-                    synth_bold,
-                    synth_italic,
-                    text,
-                    link: rc.link.clone(),
-                    ranges,
-                    text_bg,
-                });
+                if down && rc.vert {
+                    // 縦中横: the run across the line, upright (see [`tate_chu_yoko`]).
+                    let start = x + line.cl_left(run_start).unwrap_or(0.0);
+                    let end = x + line.cl_left(run_end).unwrap_or(0.0);
+                    out.extend(tate_chu_yoko(
+                        st.face,
+                        st.size,
+                        color,
+                        if has_art { 0.0 } else { alpha },
+                        synth_bold,
+                        synth_italic,
+                        rc.link.clone(),
+                        text_bg,
+                        glyphs,
+                        text,
+                        ranges,
+                        start,
+                        end,
+                        base,
+                    ));
+                } else {
+                    out.push(Draw::Glyphs {
+                        face: st.face,
+                        size: st.size,
+                        glyphs,
+                        color,
+                        alpha: if has_art { 0.0 } else { alpha },
+                        synth_bold,
+                        synth_italic,
+                        text,
+                        link: rc.link.clone(),
+                        ranges,
+                        text_bg,
+                    });
+                }
+            }
+            // 縦中横 glyphs are placed across the line one by one: a decoration along the run's
+            // line span would cut across them (Word draws it under each upright glyph instead).
+            if down && rc.vert {
+                continue;
             }
             // Decorations across the run (underline skips trailing spaces of the line). Right-to-left
             // text inside a run can split it into several visual spans.
@@ -1801,6 +1828,78 @@ fn canvas_background(rect: Rect, c: &wordcraft_doc::para::CanvasStyle) -> Draw {
         corner: None,
         dash: Vec::new(),
     }
+}
+
+/// Draws a horizontal-in-vertical run (`w:eastAsianLayout/@w:vert`, 縦中横) in top-to-bottom text:
+/// Word turns the run 90 degrees left from the way vertical text lies, so its characters stand
+/// upright side by side across the line, reading left to right, inside the length the run takes
+/// along the line (a pair of half-width digits fits one character's height). Every glyph is drawn
+/// on its own in a frame turned -90° about the em square the page's +90° turn cancels. `start` and
+/// `end` are the run's extent along the line (page coordinates of the unturned frame), `base` its
+/// baseline. The glyphs, text and ranges are the run's, as [`lines`] built them.
+fn tate_chu_yoko(
+    face: FaceRef,
+    size: f32,
+    color: Rgb,
+    alpha: f32,
+    synth_bold: bool,
+    synth_italic: bool,
+    link: Option<String>,
+    text_bg: Option<Rgb>,
+    glyphs: Vec<(u32, f32, f32)>,
+    text: String,
+    ranges: Vec<std::ops::Range<usize>>,
+    start: f32,
+    end: f32,
+    base: f32,
+) -> Vec<Draw> {
+    let n = glyphs.len();
+    let len = (end - start).max(0.0);
+    // One slot per glyph across the run's length; a pair of half-width digits makes one character.
+    let step = if n > 0 && len > 0.0 { len / n as f32 } else { size };
+    // The em square's centre across the line, where upright East Asian characters put it.
+    let across = base - size * 0.38;
+    // The run's centre along the line: every glyph is drawn there, across the line.
+    let cx = start + len / 2.0;
+    let mut out = Vec::with_capacity(n);
+    for (k, (gid, _, _)) in glyphs.iter().enumerate() {
+        // Reading order runs left to right on the turned page, so the first character is the
+        // leftmost: x of a glyph is `turn origin - cy`, and frame y grows toward the line's start.
+        let cy = across + (n as f32 - 1.0) * 0.5 * step - k as f32 * step;
+        // The glyph's own advance centres its ink in its em square (`size` when it is the only
+        // glyph and there is no next one to measure against).
+        let advance = match (glyphs.get(k + 1), glyphs.get(k)) {
+            (Some(next), Some(g)) => (g.1 - next.1).abs(),
+            _ => match (glyphs.get(k), k.checked_sub(1).and_then(|p| glyphs.get(p))) {
+                (Some(g), Some(prev)) => (g.1 - prev.1).abs(),
+                _ => size,
+            },
+        };
+        let (pen_x, pen_y) = (cx - advance / 2.0, cy + size * 0.38);
+        let (t, range) = match ranges.get(k).and_then(|r| text.get(r.clone())) {
+            Some(t) => (t.to_string(), 0..t.len()),
+            None => (String::new(), 0..0),
+        };
+        out.push(Draw::Rotated {
+            cx,
+            cy,
+            spin: Spin::new(-90.0, false, false),
+            items: vec![Draw::Glyphs {
+                face,
+                size,
+                glyphs: vec![(*gid, pen_x, pen_y)],
+                color,
+                alpha,
+                synth_bold,
+                synth_italic,
+                text: t,
+                link: link.clone(),
+                ranges: vec![range],
+                text_bg,
+            }],
+        });
+    }
+    out
 }
 
 /// Whether `c` stands upright in top-to-bottom East Asian text (`tbRl`) rather than turning with
