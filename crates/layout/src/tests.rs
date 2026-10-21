@@ -5364,6 +5364,147 @@ fn kinsoku_keeps_a_manual_line_break_before_a_closing_bracket() {
     assert_eq!(lines[1].0, bracket, "the second line starts at the bracket: {lines:?}");
 }
 
+/// The first paragraph's layout from a laid-out one-paragraph document.
+fn first_paragraph(l: &DocLayout) -> Arc<ParaLayout> {
+    l.pages[0].items.iter().find_map(|it| if let Placed::Lines { para, .. } = it { Some(para.clone()) } else { None }).unwrap()
+}
+
+/// `text` in a one-paragraph document whose lines are `width` points long.
+fn document_of_width(text: &str, width: f32) -> Document {
+    let mut d = Document::from_text(text);
+    let s = &mut d.last_section;
+    s.margin_right = s.page_w - s.margin_left - s.gutter - width;
+    d
+}
+
+/// The paragraph's cluster advances, laid out wide enough that nothing wraps.
+fn advances(text: &str) -> Vec<f32> {
+    let l = lay(&Document::from_text(text));
+    first_paragraph(&l).clusters.iter().map(|c| c.adv).collect()
+}
+
+/// The right edge of the text column of a document laid out as it is.
+fn right_margin(d: &Document) -> f32 {
+    d.last_section.page_w - d.last_section.margin_right
+}
+
+/// Word's default `w:overflowPunct` (句読点のぶら下げ): a full stop that would start the next line
+/// stays on the line and hangs past the right margin instead, and the line after it starts past
+/// the full stop. With the flag off the old push-out stands: the character before the full stop
+/// moves down with it and no line ends in the margin.
+#[test]
+fn overflow_punct_hangs_a_full_stop_past_the_margin() {
+    // Four ideographs fill the line exactly; the full stop after them does not fit.
+    let text = "漢字漢字。あ";
+    let adv = advances(text);
+    assert_eq!(adv.len(), text.chars().count(), "one cluster per character");
+    let width: f32 = adv.get(..4).into_iter().flatten().sum();
+    assert!(width > 0.0);
+    let d = document_of_width(text, width);
+    let pl = first_paragraph(&lay(&d));
+    let punct = text.find('。').expect("a full stop");
+    let l0 = pl.lines.first().expect("a first line");
+    assert_eq!(l0.c1 - l0.c0, 5, "four ideographs and the full stop: {:?}", pl.lines);
+    assert_eq!(l0.hang, 1, "only the full stop hangs");
+    assert_eq!(l0.end, LineEnd::Wrap);
+    assert_eq!(pl.clusters.get(l0.c1 - 1).map(|c| c.start), Some(punct), "the hanging cluster is the full stop");
+    assert!((l0.xs.get(4).copied().unwrap_or(-1.0) - l0.right).abs() < 0.02, "it starts at the right margin: {:?}", l0.xs);
+    assert!(l0.xs.get(5).copied().unwrap_or(0.0) > l0.right + adv.get(4).copied().unwrap_or(0.0) * 0.9, "it hangs past it: {:?}", l0.xs);
+    // The next line starts with the letter after the full stop.
+    let l1 = pl.lines.get(1).expect("a second line");
+    assert_eq!(l1.start, text.find('あ').expect("a letter after the stop"));
+    assert_eq!(l1.c1 - l1.c0, 1);
+    assert!(l1.xs.first().is_some_and(|x| *x < l1.right), "the line after the stop starts inside the column");
+    // Off: kinsoku pushes the fourth ideograph down with the full stop; nothing hangs.
+    let mut off = d.clone();
+    off.para_mut(StoryRef::Body, &Path::top(0)).expect("the body paragraph").props.overflow_punct = Some(false);
+    let off = first_paragraph(&lay(&off));
+    assert_eq!(off.lines.first().map(|l| l.c1 - l.c0), Some(3), "the old push-out: {:?}", off.lines);
+    assert_eq!(off.lines.first().map(|l| l.hang), Some(0));
+    let fourth: usize = text.char_indices().nth(3).map(|(i, _)| i).unwrap_or(0);
+    assert_eq!(off.lines.get(1).map(|l| l.start), Some(fourth), "the fourth ideograph moves down with the full stop: {:?}", off.lines);
+}
+
+/// The caret, clicks and selection follow a mark hanging past the margin: the caret before it sits
+/// at the margin, a click on its ink reaches it, the caret after it (at the paragraph's end) sits
+/// past the margin, and the selection box covers the overhanging ink.
+#[test]
+fn caret_and_clicks_follow_hanging_punctuation() {
+    let text = "漢字漢字。あ";
+    let adv = advances(text);
+    let width: f32 = adv.get(..4).into_iter().flatten().sum();
+    let d = document_of_width(text, width);
+    let right = right_margin(&d);
+    let l = lay(&d);
+    let pl = first_paragraph(&l);
+    let punct = text.find('。').expect("a full stop");
+    let line = pl.lines.first().expect("a first line");
+    // A click on the hanging ink reaches the full stop (line coordinates are inside the column).
+    let ink = line.xs.get(4).copied().unwrap_or(0.0) + adv.get(4).copied().unwrap_or(0.0) / 2.0;
+    assert!(ink > line.right);
+    assert_eq!(pl.off_at_x(0, ink), punct, "a click on the hanging mark");
+    // The caret before it sits at the margin.
+    let before = l.caret(&Pos::body(0, punct)).expect("a caret before the mark");
+    assert!((before.x - right).abs() < 0.5, "caret at {} before a mark starting at the margin {right}", before.x);
+    // Its selection box runs past the margin with the ink.
+    let spans = pl.x_spans(0, punct, punct + '。'.len_utf8());
+    assert!(spans.last().is_some_and(|s| s.1 > line.right + 0.5), "the selection covers the overhang: {spans:?}");
+    // At the paragraph's end the full stop is the last thing: the caret after it is past the margin.
+    let end_text = "漢字漢字。";
+    let d = document_of_width(end_text, width);
+    let right = right_margin(&d);
+    let l = lay(&d);
+    let pl = first_paragraph(&l);
+    let line = pl.lines.first().expect("a first line");
+    assert_eq!(line.hang, 1, "the paragraph ends with the hanging mark");
+    // The ink ends past the margin: in page coordinates that is `right` plus the overhang.
+    let after = right + (line.xs.last().copied().unwrap_or(0.0) - line.right);
+    let c = l.caret(&Pos::body(0, end_text.len())).expect("a caret after the mark");
+    assert!((c.x - after).abs() < 0.01, "the caret after the mark at {} (ink ends {after})", c.x);
+    assert!(c.x > right + adv.get(4).copied().unwrap_or(0.0) * 0.4, "it follows the mark past the margin {right}: {}", c.x);
+}
+
+/// `w:topLinePunct` (行頭の句読点の圧縮, off by default): a line that starts with a full stop sets it
+/// at half width, so what follows comes half a character earlier. Kinsoku off and no hanging leave
+/// the full stop starting the second line.
+#[test]
+fn top_line_punct_compresses_a_line_starting_with_a_full_stop() {
+    let text = "漢字漢字。あ";
+    let adv = advances(text);
+    let width: f32 = adv.get(..4).into_iter().flatten().sum();
+    let doc = |compress: bool| {
+        let mut d = document_of_width(text, width);
+        let p = d.para_mut(StoryRef::Body, &Path::top(0)).expect("the body paragraph");
+        p.props.kinsoku = Some(false);
+        p.props.overflow_punct = Some(false);
+        p.props.top_line_punct = Some(compress);
+        d
+    };
+    let punct = text.find('。').expect("a full stop");
+    let stop_adv = adv.get(4).copied().unwrap_or(0.0);
+    assert!(stop_adv > 0.0);
+    let off = first_paragraph(&lay(&doc(false)));
+    let on = first_paragraph(&lay(&doc(true)));
+    assert_eq!(off.lines.len(), on.lines.len(), "the same wrapping");
+    assert_eq!(on.lines.get(1).map(|l| l.start), Some(punct), "the second line starts with the full stop");
+    assert_eq!(off.lines.get(1).map(|l| l.start), Some(punct));
+    // Half the advance on the line, and the letter after it moves up with it.
+    let first_adv = |pl: &ParaLayout| pl.lines.get(1).and_then(|l| pl.clusters.get(l.c0)).map(|c| c.adv).unwrap_or(0.0);
+    let step = |pl: &ParaLayout| {
+        let l = pl.lines.get(1);
+        match (l.and_then(|l| l.xs.first()), l.and_then(|l| l.xs.get(1))) {
+            (Some(a), Some(b)) => b - a,
+            _ => f32::MAX,
+        }
+    };
+    let end = |pl: &ParaLayout| pl.lines.get(1).and_then(|l| l.xs.last()).copied().unwrap_or(0.0);
+    assert!((first_adv(&off) - stop_adv).abs() < 0.01, "off: full width {}", first_adv(&off));
+    assert!((step(&off) - stop_adv).abs() < 0.01, "off: the letter after the stop is a full character later {}", step(&off));
+    assert!((first_adv(&on) - stop_adv / 2.0).abs() < 0.01, "on: half width {}", first_adv(&on));
+    assert!((step(&on) - stop_adv / 2.0).abs() < 0.01, "on: the letter after the stop is half a character later {}", step(&on));
+    assert!((end(&off) - end(&on) - stop_adv / 2.0).abs() < 0.01, "on: the line is half a character shorter ({} against {})", end(&on), end(&off));
+}
+
 /// #332: a rotated floating shape keeps text clear of its rotated bounds (it reaches further at
 /// the side), its frame stays put (rotation is about the centre) and it is drawn turned; hit
 /// testing follows the turned shape, not its frame.
