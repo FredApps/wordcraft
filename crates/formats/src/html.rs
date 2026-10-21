@@ -501,6 +501,14 @@ struct El {
     page_break_after: bool,
     /// Li: a paragraph of this item was already emitted.
     used: bool,
+    /// List: the `start` attribute (1 when absent).
+    list_start: u32,
+    /// List: the number the next item gets.
+    next_item: u32,
+    /// List: an item used `value`, so later items keep their computed numbers.
+    explicit_start: bool,
+    /// Li: the item's number when it must start its own list run.
+    item_start: Option<u32>,
 }
 
 struct TableB {
@@ -765,8 +773,9 @@ impl<'r> Builder<'r> {
     fn start_para(&mut self) -> &mut Para {
         if self.para.is_none() {
             let mut p = Para::default();
-            let mut list_level: Option<(bool, usize)> = None;
+            let mut list_level: Option<(bool, u32)> = None;
             let mut li_at: Option<usize> = None;
+            let mut item_start: Option<u32> = None;
             let mut lists = 0usize;
             for (i, e) in self.stack.iter().enumerate().rev() {
                 match e.kind {
@@ -789,10 +798,13 @@ impl<'r> Builder<'r> {
                     ElKind::Heading(n) if p.kind == Kind::Normal => p.kind = Kind::Heading(n.clamp(1, 6)),
                     ElKind::Pre if p.kind == Kind::Normal => p.kind = Kind::Code,
                     ElKind::Quote if p.kind == Kind::Normal => p.kind = Kind::Quote,
-                    ElKind::Li if li_at.is_none() => li_at = Some(i),
+                    ElKind::Li if li_at.is_none() => {
+                        li_at = Some(i);
+                        item_start = e.item_start;
+                    }
                     ElKind::List(o) => {
                         if list_level.is_none() {
-                            list_level = Some((o, 0));
+                            list_level = Some((o, e.list_start));
                         }
                         lists += 1;
                     }
@@ -802,8 +814,8 @@ impl<'r> Builder<'r> {
                     p.align = e.align;
                 }
             }
-            if let (Some((o, _)), Some(li)) = (list_level, li_at) {
-                p.list = Some(ListInfo { ordered: o, level: lists.saturating_sub(1).min(8) as u8, start: 1 });
+            if let (Some((o, list_start)), Some(li)) = (list_level, li_at) {
+                p.list = Some(ListInfo { ordered: o, level: lists.saturating_sub(1).min(8) as u8, start: item_start.unwrap_or(list_start) });
                 self.para_cont = self.stack.get(li).is_some_and(|e| e.used);
                 if let Some(e) = self.stack.get_mut(li) {
                     e.used = true;
@@ -1161,6 +1173,25 @@ impl<'r> Builder<'r> {
         if matches!(kind, ElKind::Tr | ElKind::Cell) && self.tables.is_empty() {
             kind = ElKind::Block;
         }
+        let list_start = if matches!(kind, ElKind::List(_)) {
+            attr(attrs, "start").and_then(|v| v.trim().parse::<u32>().ok()).map(|n| n.clamp(1, 32767)).unwrap_or(1)
+        } else {
+            1
+        };
+        let mut item_start = None;
+        if name == "li" {
+            let value = attr(attrs, "value").and_then(|v| v.trim().parse::<u32>().ok()).map(|n| n.clamp(1, 32767));
+            if let Some(list) = self.stack.iter_mut().rev().find(|e| matches!(e.kind, ElKind::List(_))) {
+                let n = value.unwrap_or(list.next_item.max(1));
+                list.next_item = n.saturating_add(1);
+                if value.is_some() {
+                    list.explicit_start = true;
+                }
+                if value.is_some() || list.explicit_start {
+                    item_start = Some(n);
+                }
+            }
+        }
         if kind != ElKind::Inline {
             self.flush();
         }
@@ -1271,7 +1302,20 @@ impl<'r> Builder<'r> {
             }
             _ => {}
         }
-        self.stack.push(El { name: name.to_string(), kind, fmt, align, preserve, page_break, page_break_after, used: false });
+        self.stack.push(El {
+            name: name.to_string(),
+            kind,
+            fmt,
+            align,
+            preserve,
+            page_break,
+            page_break_after,
+            used: false,
+            list_start,
+            next_item: list_start,
+            explicit_start: false,
+            item_start,
+        });
     }
 
     fn end(&mut self, name: &str) {
