@@ -3,6 +3,7 @@
 
 use super::*;
 use wordcraft_doc::Pos;
+use wordcraft_doc::props::{CharProps, EastAsianLayout};
 
 fn lay(doc: &Document) -> DocLayout {
     let mut c = LayoutCache::new();
@@ -102,6 +103,124 @@ fn east_asian_characters_stand_upright_in_top_to_bottom_text() {
     let upright = cjk.iter().filter(|x| matches!(x, display::Draw::Rotated { spin, .. } if spin.deg == 270.0)).count();
     assert_eq!(upright, "日本語のテキスト".chars().count());
     assert!(turned.iter().any(|ds| text_of(ds).contains("Vertical") && ds.iter().all(|x| !matches!(x, display::Draw::Rotated { .. }))));
+}
+
+/// 縦中横 (`w:eastAsianLayout/@w:vert`): a run in top-to-bottom text is drawn as the horizontal
+/// text it is — its characters stand upright side by side across the line, inside the length the
+/// run takes along it (a pair of half-width digits fits one character's height). Without `vert`
+/// the digits lie with the line as before; horizontal text ignores `vert`, and the layout (line
+/// breaking, cluster advances, carets) is the same either way.
+#[test]
+fn tate_chu_yoko_stands_upright_across_a_top_to_bottom_line() {
+    let text = "日本語12テスト";
+    let start = text.find('1').expect("a digit");
+    let digits = start..start + 2;
+    let mark = |d: &mut Document, on: bool| {
+        let p = d.para_mut(StoryRef::Body, &Path::top(0)).unwrap();
+        let digit_range = digits.clone();
+        p.format(digit_range.start, digit_range.end, &|c: &mut CharProps| {
+            c.east_asian_layout = if on { Some(EastAsianLayout { vert: Some(true), ..Default::default() }) } else { None };
+        })
+        .unwrap();
+    };
+    let mut d = Document::from_text(text);
+    d.last_section.text_direction = TextDirection::Down;
+    mark(&mut d, true);
+    let l = lay(&d);
+    let para = |l: &DocLayout| {
+        l.pages[0]
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Placed::Lines { para, path, .. } if path.0 == [0] => Some(para.clone()),
+                _ => None,
+            })
+            .expect("the paragraph's lines")
+    };
+    let pl = para(&l);
+    // The layout is unchanged: the digits keep their shaped advances along the line.
+    let mut off_doc = d.clone();
+    mark(&mut off_doc, false);
+    let off_pl = para(&lay(&off_doc));
+    assert_eq!(
+        pl.clusters.iter().map(|c| (c.start, c.adv)).collect::<Vec<_>>(),
+        off_pl.clusters.iter().map(|c| (c.start, c.adv)).collect::<Vec<_>>(),
+        "vert does not change the layout"
+    );
+    let line = pl.lines.first().expect("one line");
+    let k1 = pl.clusters.iter().position(|c| c.start == start).expect("the first digit's cluster");
+    let k2 = k1 + 1;
+    let len = line.cl_left(k2 + 1).unwrap_or(0.0) - line.cl_left(k1).unwrap_or(0.0);
+    let size = pl.styles.get(pl.clusters[k1].style as usize).map(|s| s.size).unwrap_or(12.0);
+    assert!(len > 0.0 && len < size * 1.6, "the pair takes about one character along the line: {len} pt at {size} pt");
+
+    // The display turns the two digits upright, side by side across the line: one page height,
+    // the first left of the second by half the pair's length.
+    let draws = display::page_display(&d, &l.pages[0], &Default::default());
+    let rotated = |draws: &[display::Draw]| -> Vec<(String, f32, f32, f32)> {
+        let mut out = Vec::new();
+        for d in draws {
+            let display::Draw::Turned { x, y, turn, items } = d else { continue };
+            for it in items {
+                let display::Draw::Rotated { cx, cy, spin, items } = it else { continue };
+                let t: String =
+                    items.iter().filter_map(|i| if let display::Draw::Glyphs { text, .. } = i { Some(text.as_str()) } else { None }).collect();
+                let (px, py) = crate::turn_point(*turn, *x, *y, *cx, *cy);
+                out.push((t, px, py, spin.deg));
+            }
+        }
+        out
+    };
+    let marks = rotated(&draws);
+    let one = marks.iter().find(|m| m.0 == "1").expect("the first digit drawn on its own");
+    let two = marks.iter().find(|m| m.0 == "2").expect("the second digit drawn on its own");
+    assert_eq!((one.3, two.3), (270.0, 270.0), "upright like the ideographs: {one:?} {two:?}");
+    assert!((one.2 - two.2).abs() < 0.01, "one page height for both: {one:?} {two:?}");
+    assert!(one.1 < two.1, "the first digit is left of the second: {one:?} {two:?}");
+    assert!((two.1 - one.1 - len / 2.0).abs() < 0.05, "half the pair's length apart: {} against {}", two.1 - one.1, len / 2.0);
+    // The text is still read and extracted in order.
+    let read: String = draws
+        .iter()
+        .map(|d| match d {
+            display::Draw::Turned { items, .. } => items
+                .iter()
+                .map(|i| match i {
+                    display::Draw::Glyphs { text, .. } => text.clone(),
+                    display::Draw::Rotated { items, .. } => {
+                        items.iter().filter_map(|g| if let display::Draw::Glyphs { text, .. } = g { Some(text.clone()) } else { None }).collect()
+                    }
+                    _ => String::new(),
+                })
+                .collect::<String>(),
+            _ => String::new(),
+        })
+        .collect();
+    assert!(read.contains(text), "the line reads {text}: {read}");
+    // Carets at the digit offsets are found again by a click.
+    for off in [start, start + 1, start + 2] {
+        let c = l.caret(&Pos::body(0, off)).unwrap();
+        let hit = l.hit(c.page, c.x + c.width / 2.0, c.top + 0.2, StoryRef::Body).unwrap();
+        assert_eq!(hit.off, off, "caret at {off} at {c:?}");
+    }
+
+    // Without vert the digits keep lying with the line: no upright glyphs of their own.
+    let off_l = lay(&off_doc);
+    let off_marks = rotated(&display::page_display(&off_doc, &off_l.pages[0], &Default::default()));
+    assert!(off_marks.iter().all(|m| m.0 != "1" && m.0 != "2"), "without vert the digits lie with the line: {off_marks:?}");
+    let off_lying = display::page_display(&off_doc, &off_l.pages[0], &Default::default()).iter().any(|d| match d {
+        display::Draw::Turned { items, .. } => items.iter().any(|i| matches!(i, display::Draw::Glyphs { text, .. } if text.contains("12"))),
+        _ => false,
+    });
+    assert!(off_lying, "the lying digits are one text run");
+
+    // Horizontal text ignores vert: no turns, no upright glyphs of its own, and the run reads as
+    // one text either way.
+    let mut h = d.clone();
+    h.last_section.text_direction = TextDirection::Horizontal;
+    let hl = lay(&h);
+    let hdraws = display::page_display(&h, &hl.pages[0], &Default::default());
+    assert!(hdraws.iter().all(|d| !matches!(d, display::Draw::Turned { .. })), "horizontal text is not turned");
+    assert!(hdraws.iter().all(|d| !matches!(d, display::Draw::Rotated { .. })), "horizontal text draws no upright glyphs of its own");
 }
 
 #[test]
