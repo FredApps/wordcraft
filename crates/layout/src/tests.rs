@@ -5505,6 +5505,113 @@ fn top_line_punct_compresses_a_line_starting_with_a_full_stop() {
     assert!((end(&off) - end(&on) - stop_adv / 2.0).abs() < 0.01, "on: the line is half a character shorter ({} against {})", end(&on), end(&off));
 }
 
+/// A field result is classed by the text it shows, as `autoSpace` classes one: under
+/// `overflowPunct` a result starting with a full stop hangs past the margin like the character,
+/// and under `topLinePunct` one starting a line is compressed to half width. A result that is not
+/// punctuation keeps the old push-out.
+#[test]
+fn a_field_result_is_classed_by_the_punctuation_it_shows() {
+    let field = |result: &str| InlineObject::Field {
+        instr: "REF bookmark".into(),
+        result: result.into(),
+        locked: false,
+        dirty: false,
+        code: false,
+        form: String::new(),
+    };
+    // Overflow punctuation: four ideographs fill the line, and the field showing "。" hangs.
+    let trailing = |result: &str| {
+        let mut d = Document::from_text("漢字漢字");
+        d.insert_object(&Pos::body(0, 12), field(result), &Default::default()).unwrap();
+        d
+    };
+    let probe = first_paragraph(&lay(&trailing("。")));
+    let at = probe.clusters.iter().position(|c| c.start == 12).expect("the field's cluster");
+    assert!(probe.shown.iter().any(|s| s.0 == at && s.1 == "。"), "the field shows its result: {:?}", probe.shown);
+    let width: f32 = probe.clusters.get(..at).into_iter().flatten().map(|c| c.adv).sum();
+    let hung = |result: &str| {
+        let mut d = trailing(result);
+        d.last_section.margin_right = d.last_section.page_w - d.last_section.margin_left - d.last_section.gutter - width;
+        first_paragraph(&lay(&d))
+    };
+    let pl = hung("。");
+    let line = pl.lines.first().expect("a first line");
+    assert_eq!(line.c1 - line.c0, at + 1, "the full stop hangs on the line: {:?}", pl.lines);
+    assert_eq!(line.hang, 1);
+    assert_eq!(pl.clusters.get(line.c1 - 1).map(|c| c.start), Some(12), "the hanging cluster is the field");
+    assert!((line.xs.get(at).copied().unwrap_or(-1.0) - line.right).abs() < 0.02, "it starts at the margin: {:?}", line.xs);
+    assert!(line.xs.get(at + 1).copied().unwrap_or(0.0) > line.right, "it hangs past it: {:?}", line.xs);
+    let plain = hung("X");
+    assert_eq!(plain.lines.first().map(|l| l.c1 - l.c0), Some(at), "a result that isn't punctuation doesn't hang: {:?}", plain.lines);
+    assert_eq!(plain.lines.first().map(|l| l.hang), Some(0));
+    // Line-start punctuation: the field showing "。" starts the second line and is compressed.
+    let leading = || {
+        let mut d = Document::from_text("ああい");
+        d.insert_object(&Pos::body(0, 6), field("。"), &Default::default()).unwrap();
+        d
+    };
+    let probe = first_paragraph(&lay(&leading()));
+    let at = probe.clusters.iter().position(|c| c.start == 6).expect("the field's cluster");
+    let width: f32 = probe.clusters.get(..at).into_iter().flatten().map(|c| c.adv).sum();
+    let stop = probe.clusters.get(at).map(|c| c.adv).unwrap_or(0.0);
+    assert!(stop > 0.0 && probe.shown.iter().any(|s| s.0 == at && s.1 == "。"));
+    let compress = |on: bool| {
+        let mut d = leading();
+        d.last_section.margin_right = d.last_section.page_w - d.last_section.margin_left - d.last_section.gutter - width;
+        let p = d.para_mut(StoryRef::Body, &Path::top(0)).unwrap();
+        p.props.overflow_punct = Some(false);
+        p.props.top_line_punct = Some(on);
+        first_paragraph(&lay(&d))
+    };
+    let (off, on) = (compress(false), compress(true));
+    for pl in [&off, &on] {
+        assert_eq!(pl.lines.get(1).map(|l| l.start), Some(6), "the second line starts with the field: {:?}", pl.lines);
+    }
+    let first_adv = |pl: &ParaLayout| pl.lines.get(1).and_then(|l| pl.clusters.get(l.c0)).map(|c| c.adv).unwrap_or(0.0);
+    let step = |pl: &ParaLayout| -> Option<f32> {
+        let l = pl.lines.get(1)?;
+        Some(l.xs.get(1)? - l.xs.first()?)
+    };
+    assert!((first_adv(&off) - stop).abs() < 0.01, "off: the field keeps its full width {}", first_adv(&off));
+    assert!((first_adv(&on) - stop / 2.0).abs() < 0.01, "on: the field is half width {}", first_adv(&on));
+    assert!(step(&off).is_some_and(|s| (s - stop).abs() < 0.01), "off: {:?}", step(&off));
+    assert!(step(&on).is_some_and(|s| (s - stop / 2.0).abs() < 0.01), "on: {:?}", step(&on));
+}
+
+/// Distributed alignment spreads the content over the line and lets a hanging mark follow it: the
+/// mark takes no slot of its own, so it starts at the margin and hangs past it instead of drifting
+/// away from the text. A single content cluster has no gap to spread, so its mark stays attached.
+#[test]
+fn distributed_alignment_gives_hanging_punctuation_no_slot() {
+    let distributed = |text: &str, width: f32| {
+        let mut d = document_of_width(text, width);
+        d.para_mut(StoryRef::Body, &Path::top(0)).unwrap().props.align = Some(Align::Distribute);
+        first_paragraph(&lay(&d))
+    };
+    // Four ideographs and a full stop with room for only half of it.
+    let text = "漢字漢字。";
+    let adv = advances(text);
+    let width: f32 = adv.get(..4).into_iter().flatten().sum::<f32>() + adv.get(4).copied().unwrap_or(0.0) * 0.5;
+    let pl = distributed(text, width);
+    let line = pl.lines.first().expect("a first line");
+    assert_eq!(line.hang, 1, "the full stop hangs: {:?}", pl.lines);
+    let last = line.c1 - 1 - line.c0; // the index of the last content cluster in `xs`
+    let mark = line.xs.get(last + 1).copied().unwrap_or(0.0);
+    let content_adv = pl.clusters.get(line.c1 - 2).map(|c| c.adv).unwrap_or(0.0);
+    let content_right = line.xs.get(last).copied().unwrap_or(0.0) + content_adv;
+    assert!(content_right > line.right - 0.02, "the content reaches the margin: {content_right} against {}", line.right);
+    assert!((mark - content_right).abs() < 0.02, "the mark follows the content with no gap: {mark} against {content_right}");
+    // One content cluster: nothing to distribute, and the mark still follows it.
+    let text = "漢。";
+    let adv = advances(text);
+    let pl = distributed(text, adv.first().copied().unwrap_or(0.0) + adv.get(1).copied().unwrap_or(0.0) * 0.5);
+    let line = pl.lines.first().expect("a first line");
+    assert_eq!(line.hang, 1, "the full stop hangs: {:?}", pl.lines);
+    let mark = line.xs.get(1).copied().unwrap_or(0.0);
+    let content_right = line.xs.first().copied().unwrap_or(0.0) + pl.clusters.first().map(|c| c.adv).unwrap_or(0.0);
+    assert!((mark - content_right).abs() < 0.02, "the mark stays attached to the single character: {mark} against {content_right}");
+}
+
 /// #332: a rotated floating shape keeps text clear of its rotated bounds (it reaches further at
 /// the side), its frame stays put (rotation is about the centre) and it is drawn turned; hit
 /// testing follows the turned shape, not its frame.

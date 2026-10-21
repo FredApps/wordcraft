@@ -1948,9 +1948,13 @@ fn ptab_stop(align: PTabAlign, base: PTabBase, leader: TabLeader, width: f32, in
     TabStop { pos, align, leader }
 }
 
-/// The character a text cluster draws, from the paragraph's own text: `None` for objects, breaks
-/// and markers, whose byte range stands for no character of the text.
-fn cluster_char(text: &str, c: &Cluster) -> Option<char> {
+/// The first character a text cluster draws: a field or note result is classed by the text it shows
+/// (as [`auto_space`] does), else by the paragraph's own text. `None` for objects, breaks and
+/// markers, whose byte range stands for no character of the text.
+fn cluster_char(text: &str, shown: &[(usize, String, Vec<std::ops::Range<usize>>)], k: usize, c: &Cluster) -> Option<char> {
+    if let Ok(i) = shown.binary_search_by_key(&k, |s| s.0) {
+        return shown.get(i).and_then(|s| s.1.chars().next());
+    }
     text.get(c.start..c.end).and_then(|s| s.chars().next())
 }
 
@@ -2184,7 +2188,9 @@ fn break_lines(pl: &mut ParaLayout, text: &str, env: &ParaEnv, mark_style: u32, 
                 line_visible = true;
                 // A span narrowed by a floating object can be abandoned and broken again (`skip`),
                 // which would halve the character twice; its edge is not the text margin anyway.
-                if rp.top_line_punct && !narrowed && pl.clusters.get(j).and_then(|p| cluster_char(text, p)).is_some_and(crate::kinsoku::closing_punct)
+                if rp.top_line_punct
+                    && !narrowed
+                    && pl.clusters.get(j).and_then(|p| cluster_char(text, &pl.shown, j, p)).is_some_and(crate::kinsoku::closing_punct)
                 {
                     if let Some(p) = pl.clusters.get_mut(j) {
                         p.adv *= 0.5;
@@ -2202,7 +2208,7 @@ fn break_lines(pl: &mut ParaLayout, text: &str, env: &ParaEnv, mark_style: u32, 
                 && rp.overflow_punct
                 && !narrowed
                 && x <= right_edge + 0.01
-                && pl.clusters.get(j).and_then(|p| cluster_char(text, p)).is_some_and(crate::kinsoku::closing_punct)
+                && pl.clusters.get(j).and_then(|p| cluster_char(text, &pl.shown, j, p)).is_some_and(crate::kinsoku::closing_punct)
                 && (c0..j).any(|k| pl.clusters.get(k).is_some_and(takes_room));
             if hangs {
                 hang_from.get_or_insert(j);
@@ -2521,12 +2527,26 @@ fn break_lines(pl: &mut ParaLayout, text: &str, env: &ParaEnv, mark_style: u32, 
                 })
                 .collect();
             if rp.align == Align::Distribute || spaces.is_empty() {
-                let cnt = (c1 - align_from).saturating_sub(1).max(1) as f32;
                 if rp.align == Align::Distribute {
-                    let per = slack / cnt;
-                    for (q, v) in xs.iter_mut().enumerate().skip(align_from - c0) {
-                        let k = (q + c0 - align_from) as f32;
-                        *v += per * k.min(cnt);
+                    // A hanging punctuation mark takes no slot: the content spreads over the line
+                    // (gaining the whole `slack`, so its end reaches the margin) and the mark, which
+                    // starts where the content ended, moves the same distance and hangs past it. A
+                    // line with a single content cluster has no gap to spread: the mark stays
+                    // attached to the cluster rather than drifting away from it.
+                    let content = c1 - hang;
+                    let count = content.saturating_sub(align_from);
+                    if count > 1 {
+                        let slots = count - 1;
+                        let per = slack / slots as f32;
+                        for (q, v) in xs.iter_mut().enumerate().skip(align_from - c0).take(count) {
+                            let k = (q + c0 - align_from) as f32;
+                            *v += per * k.min(slots as f32);
+                        }
+                        if hang > 0 {
+                            for v in xs.iter_mut().skip(content - c0) {
+                                *v += slack;
+                            }
+                        }
                     }
                 }
             } else {
