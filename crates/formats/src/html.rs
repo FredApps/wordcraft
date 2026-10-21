@@ -2088,5 +2088,19 @@ mod tests {
         let html2 = export_flow(&flow2, "en");
         assert!(html2.contains("<ol>"), "expected default <ol> in:\n{html2}");
         assert!(!html2.contains("start="), "default start 1 should not write start attribute:\n{html2}");
+
+        // Document with start_overrides on a numbering instance
+        let mut doc = Document::from_text("first item\nsecond item");
+        let list_id = doc.numbering.add_list(wordcraft_doc::numbering::ListKind::Numbered);
+        if let Some(num) = doc.numbering.nums.iter_mut().find(|x| x.id == list_id) {
+            num.start_overrides = vec![(0, 7)];
+        }
+        for path in doc.para_paths(wordcraft_doc::StoryRef::Body) {
+            if let Ok(p) = doc.para_mut(wordcraft_doc::StoryRef::Body, &path) {
+                p.props.numbering = Some(wordcraft_doc::props::NumRef { num: list_id, level: 0 });
+            }
+        }
+        let html3 = export(&doc);
+        assert!(html3.contains("<ol start=\"7\">"), "expected start_overrides to export <ol start=\"7\"> in:\n{html3}");
     }
 }
