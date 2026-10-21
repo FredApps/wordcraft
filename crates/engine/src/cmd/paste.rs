@@ -287,7 +287,7 @@ pub fn paste_content(s: &mut Session, v: &Value) -> Result<Pasted, CmdError> {
                 }
             });
         }
-        return Ok(f);
+        return Ok(Pasted::Fragment(f));
     }
     match text {
         Some(t) if !t.is_empty() => Ok(Pasted::Text(t)),

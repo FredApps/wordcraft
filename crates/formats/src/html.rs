@@ -751,7 +751,7 @@ fn apply_style(css: &str, f: &mut Fmt, align: &mut Option<Align>, preserve: &mut
                     let at = v.len().saturating_sub(family.len());
                     let family = v.get(at..).unwrap_or("");
                     let css = format!("font-weight:{weight};font-style:{style};font-size:{pt}pt;font-family:{family}");
-                    apply_style(&css, f, align, preserve, page_break);
+                    apply_style(&css, f, align, preserve, page_break, page_break_after);
                 }
             }
             "font-family" => {
