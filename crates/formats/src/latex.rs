@@ -108,20 +108,29 @@ const SECTIONS: [&str; 6] = ["section", "subsection", "subsubsection", "paragrap
 
 impl Writer {
     fn blocks(&mut self, blocks: &[FBlock]) {
-        let mut lists: Vec<bool> = Vec::new();
+        let mut lists: Vec<(bool, u32)> = Vec::new();
         let mut i = 0;
         while let Some(b) = blocks.get(i) {
             let list = if let FBlock::Para(p) = b { p.list } else { None };
             match list {
                 Some(li) => {
                     let depth = (li.level.min(3) + 1) as usize;
-                    while lists.len() > depth || (lists.len() == depth && lists.last() != Some(&li.ordered)) {
+                    while lists.len() > depth
+                        || (lists.len() == depth && lists.last().is_some_and(|last| last.0 != li.ordered || (li.ordered && last.1 != li.start)))
+                    {
                         self.close_list(&mut lists);
                     }
                     while lists.len() < depth {
                         let env = if li.ordered { "enumerate" } else { "itemize" };
-                        self.out.push_str(&format!("{}\\begin{{{env}}}\n", "  ".repeat(lists.len())));
-                        lists.push(li.ordered);
+                        let indent = "  ".repeat(lists.len());
+                        self.out.push_str(&format!("{indent}\\begin{{{env}}}\n"));
+                        if li.ordered && li.start != 1 {
+                            const ENUM_COUNTERS: [&str; 4] = ["enumi", "enumii", "enumiii", "enumiv"];
+                            let counter = ENUM_COUNTERS.get(lists.len()).copied().unwrap_or("enumi");
+                            let start_val = (li.start as i64) - 1;
+                            self.out.push_str(&format!("{indent}  \\setcounter{{{counter}}}{{{start_val}}}\n"));
+                        }
+                        lists.push((li.ordered, li.start));
                     }
                 }
                 None => {
@@ -181,8 +190,8 @@ impl Writer {
         }
     }
 
-    fn close_list(&mut self, lists: &mut Vec<bool>) {
-        if let Some(ordered) = lists.pop() {
+    fn close_list(&mut self, lists: &mut Vec<(bool, u32)>) {
+        if let Some((ordered, _)) = lists.pop() {
             let env = if ordered { "enumerate" } else { "itemize" };
             self.out.push_str(&format!("{}\\end{{{env}}}\n", "  ".repeat(lists.len())));
             if lists.is_empty() && !self.in_cell {
@@ -3092,5 +3101,29 @@ Caf\'e na\"ive \c{c}a \v{s}\'{e} and {\bfseries grouped bold} after.
                 Fmt { link: Some("https://example.com/~user/page".to_string()), ..Default::default() }
             )
         );
+    }
+
+    /// #3494: LaTeX export preserves ordered-list start numbers.
+    #[test]
+    fn latex_export_preserves_ordered_list_start_numbers() {
+        let mut flow = Flow::default();
+        let p1 = Para {
+            list: Some(ListInfo { ordered: true, level: 0, start: 5 }),
+            inlines: vec![Inline::Text("five".into(), Fmt::default())],
+            ..Default::default()
+        };
+        let p2 = Para {
+            list: Some(ListInfo { ordered: true, level: 0, start: 5 }),
+            inlines: vec![Inline::Text("six".into(), Fmt::default())],
+            ..Default::default()
+        };
+        flow.blocks.push(FBlock::Para(p1));
+        flow.blocks.push(FBlock::Para(p2));
+
+        let doc = crate::model::to_doc(&flow);
+        let tex = export(&doc);
+        assert!(tex.contains("\\begin{enumerate}\n  \\setcounter{enumi}{4}"), "expected \\setcounter{{enumi}}{{4}} in:\n{tex}");
+        assert!(tex.contains("\\item five"), "expected \\item five in:\n{tex}");
+        assert!(tex.contains("\\item six"), "expected \\item six in:\n{tex}");
     }
 }
