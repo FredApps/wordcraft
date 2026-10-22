@@ -247,3 +247,71 @@ fn source_elements_require_ids_and_their_own_relationship_types() {
         assert!(err.to_string().contains("mail merge"), "{case}: {err}");
     }
 }
+
+#[test]
+fn strict_mail_merge_settings_keep_consistent_namespaces_through_two_saves() {
+    const SW: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";
+    const SR: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+    for aliases in [false, true] {
+        let original = fixture(&merge(), &source_rels());
+        let mut input = zip::ZipArchive::new(std::io::Cursor::new(original)).unwrap();
+        let mut output = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for i in 0..input.len() {
+            let mut entry = input.by_index(i).unwrap();
+            let mut xml = String::new();
+            entry.read_to_string(&mut xml).unwrap();
+            let mut xml = xml.replace(W, SW).replace(R, SR);
+            if entry.name() == "word/settings.xml" && aliases {
+                xml = xml.replace("w:", "x:").replace("xmlns:w=", "xmlns:x=").replace("r:", "rel:").replace("xmlns:r=", "xmlns:rel=");
+            }
+            output.start_file(entry.name(), zip::write::SimpleFileOptions::default()).unwrap();
+            output.write_all(xml.as_bytes()).unwrap();
+        }
+        let mut doc = wordcraft_docx::read(&output.finish().unwrap().into_inner()).unwrap();
+        for _ in 0..2 {
+            let saved = wordcraft_docx::write(&doc).unwrap();
+            let settings = part(&saved, "word/settings.xml");
+            // An aliased root takes the existing generated-part fallback, which is Transitional.
+            let (expected_w, expected_r) = if aliases { (W, R) } else { (SW, SR) };
+            let mut reader = quick_xml::NsReader::from_str(&settings);
+            let mut merge_count = 0;
+            let mut references = Vec::new();
+            loop {
+                let (namespace, event) = reader.read_resolved_event().unwrap();
+                match event {
+                    Event::Start(e) | Event::Empty(e) => {
+                        if e.name().as_ref().starts_with(b"w:") {
+                            assert!(
+                                matches!(namespace, quick_xml::name::ResolveResult::Bound(ns) if ns.as_ref() == expected_w.as_bytes()),
+                                "{settings}"
+                            );
+                        }
+                        merge_count += usize::from(e.local_name().as_ref() == b"mailMerge");
+                        for attr in e.attributes() {
+                            let attr = attr.unwrap();
+                            if attr.key.as_ref() == b"r:id" {
+                                assert!(
+                                    matches!(reader.resolver().resolve_attribute(attr.key).0, quick_xml::name::ResolveResult::Bound(ns) if ns.as_ref() == expected_r.as_bytes()),
+                                    "{settings}"
+                                );
+                                references.push(attr.normalized_value(quick_xml::XmlVersion::Explicit1_0).unwrap().into_owned());
+                            }
+                        }
+                    }
+                    Event::Eof => break,
+                    _ => {}
+                }
+            }
+            assert_eq!(merge_count, 1);
+            assert_eq!(references.len(), 3);
+            assert_eq!(elements(&settings, "w:query")[0]["w:val"], "SELECT Name, Company, Reference FROM Letters");
+            let rels = elements(&part(&saved, "word/_rels/settings.xml.rels"), "Relationship");
+            for id in references {
+                let rel = rels.iter().find(|r| r["Id"] == id).unwrap();
+                assert!(rel["Type"].starts_with(SR) || rel["Type"] == format!("{R}/attachedTemplate"));
+                assert_eq!(rel["TargetMode"], "External");
+            }
+            doc = wordcraft_docx::read(&saved).unwrap();
+        }
+    }
+}
