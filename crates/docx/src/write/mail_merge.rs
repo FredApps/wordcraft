@@ -5,7 +5,7 @@ use wordcraft_doc::Document;
 
 use super::PartRels;
 use crate::DocxError;
-use crate::package::{MAIL_MERGE_RELS, MAX_EMBEDDED_RELS, MAX_EMBEDDED_XML, Rels, SETTINGS_ORIG};
+use crate::package::{MAIL_MERGE_RELS, MAX_EMBEDDED_RELS, MAX_EMBEDDED_XML, Rels, SETTINGS_ORIG, relative};
 use crate::xml::{self, Node, W};
 
 /// Keep the settings part's relationship map with the original settings. Both survive native
@@ -52,9 +52,9 @@ pub(crate) fn keep_rels(rels: &Rels) -> Result<Vec<u8>, DocxError> {
     Ok(bytes)
 }
 
-/// Rebind only mail-merge external sources to newly allocated IDs. Missing, ambiguous, internal
-/// or unsupported references refuse the save rather than silently turning a template into a letter.
-pub(super) fn write(doc: &Document, out: &mut PartRels) -> Result<Option<String>, DocxError> {
+/// Rebind external sources and the single opaque internal recipient leaf to allocated IDs.
+/// Unsupported references refuse the save rather than silently changing the recipient choices.
+pub(super) fn write(doc: &Document, out: &mut PartRels, embeds: &mut super::embed::EmbedWriter<'_>) -> Result<Option<String>, DocxError> {
     let Some(orig) = doc.passthrough.get(SETTINGS_ORIG) else { return Ok(None) };
     let settings = xml::parse(orig)?;
     let Some(original) = settings.child("w:mailMerge") else { return Ok(None) };
@@ -63,11 +63,20 @@ pub(super) fn write(doc: &Document, out: &mut PartRels) -> Result<Option<String>
     }
     let rels = doc.passthrough.get(MAIL_MERGE_RELS).map(|bytes| xml::parse(bytes)).transpose()?;
     let mut merge = original.clone();
+    let recipient_id = original.child("w:odso").and_then(|o| o.child("w:recipientData")).and_then(|r| r.attr("r:id"));
     let mut ids = BTreeMap::<String, String>::new();
+    let mut recipient_seen = false;
     let mut pending = vec![&mut merge];
     while let Some(e) = pending.pop() {
         if e.name.starts_with("?:") || e.attrs.iter().any(|(k, _)| k.starts_with("?:")) {
             return Err(DocxError::MailMerge("unrecognised namespace in mailMerge".into()));
+        }
+        let recipient = e.name == "w:recipientData";
+        if recipient {
+            if recipient_seen || recipient_id.is_none() || e.attrs.iter().filter(|(name, _)| name == "r:id").count() != 1 {
+                return Err(DocxError::MailMerge("expected one recipient data reference".into()));
+            }
+            recipient_seen = true;
         }
         let source_type = match e.name.as_str() {
             "w:dataSource" | "w:src" => Some("mailMergeSource"),
@@ -96,16 +105,21 @@ pub(super) fn write(doc: &Document, out: &mut PartRels) -> Result<Option<String>
                     && (kind == format!("http://schemas.openxmlformats.org/officeDocument/2006/relationships/{suffix}")
                         || kind == format!("http://purl.oclc.org/ooxml/officeDocument/relationships/{suffix}"))
             });
-            if !external || !source || target.trim().is_empty() {
+            if target.trim().is_empty() || if recipient { external || !crate::mail_merge::recipient_kind(kind) } else { !external || !source } {
                 return Err(DocxError::MailMerge(format!(
-                    "unsupported or empty source relationship {id}; only external mail merge sources are preserved"
+                    "unsupported or empty source relationship {id}; expected an external source or internal recipient data"
                 )));
             }
             if let Some(new) = ids.get(id) {
                 *id = new.clone();
                 continue;
             }
-            let new = out.add(kind, target, true);
+            let new = if recipient {
+                let written = embeds.recipient_data(target)?;
+                out.add(kind, &relative("word/settings.xml", &written), false)
+            } else {
+                out.add(kind, target, true)
+            };
             ids.insert(id.clone(), new.clone());
             *id = new;
         }
