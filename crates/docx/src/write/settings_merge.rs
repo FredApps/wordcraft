@@ -273,8 +273,22 @@ pub fn has_unowned(original: &[u8]) -> bool {
 pub fn merge(original: &[u8], generated: &[u8]) -> Option<Vec<u8>> {
     let orig = std::str::from_utf8(original).ok()?;
     let gen_s = std::str::from_utf8(generated).ok()?;
-    let (o_open, o_close, o_kids) = children(orig, "w:settings")?;
+    let (o_open, o_close, mut o_kids) = children(orig, "w:settings")?;
     let (_, _, g_kids) = children(gen_s, "w:settings")?;
+    // Mail merge is regenerated from the namespace-aware tree. Recognise the same children
+    // here, including local/default aliases, so an unreferenced original is not kept beside it.
+    // Keep every other child's existing byte-preserving merge policy.
+    if g_kids.iter().any(|child| child.name == "w:mailMerge") {
+        let parsed = crate::xml::parse(original).ok()?;
+        if parsed.els().count() != o_kids.len() {
+            return None;
+        }
+        for (child, element) in o_kids.iter_mut().zip(parsed.els()) {
+            if element.name == "w:mailMerge" {
+                child.name.clone_from(&element.name);
+            }
+        }
+    }
     // Prefixes the generated children use must be declared by the original root.
     let root_tag = orig.get(..o_open)?;
     for p in ["w", "m", "r"] {
