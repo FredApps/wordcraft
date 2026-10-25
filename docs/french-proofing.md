@@ -1,6 +1,6 @@
 # Shipping and improving French proofing
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (French spelling keeps attached combining marks and checks compound boundaries); previously minor (French proofing region parser respects extension boundaries); previously minor (French dictionary recovery and regional labels); previously trivial (French hyphenation CI path coverage); previously minor (historical affix compatibility gates and pinned French CI toolchain); previously major (French integration and regression gates, based on #1660)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-25 · **Change:** minor (integration with current main, shared NFC lookup and external interface catalogs); previously minor (French spelling keeps attached combining marks and checks compound boundaries); previously minor (French proofing region parser respects extension boundaries); previously minor (French dictionary recovery and regional labels); previously trivial (French hyphenation CI path coverage); previously minor (historical affix compatibility gates and pinned French CI toolchain); previously major (French integration and regression gates, based on #1660)
 
 ## Shared-engine compatibility and reproducible CI
 
@@ -101,13 +101,14 @@ and a second failed replacement. Options labels keep France and Canada distinct.
 The proofing tokenizer keeps a Unicode Mark attached to its preceding letter or
 continuing mark sequence. It does not attach an orphan mark after punctuation or
 digits. This avoids splitting a decomposed spelling such as `e` + U+0301 + `cole`
-before the dictionary can apply its existing input conversions. The original
+before spelling lookup. Current main composes lookup copies to NFC before dictionary input conversions. The original
 UTF-8 text and issue offsets are retained; the document is not normalized or
 rewritten. See [Unicode canonical equivalence](https://unicode.org/reports/tr15/#Canonical_And_Compatibility_Equivalence).
 
 French punctuation trimming also retains a final attached mark, as in `cafe` +
-U+0301. Recognition still depends on the installed dictionary and its input
-conversions; this change does not add a general normalization engine.
+U+0301. The shared NFC lookup introduced on main is preserved for French and
+other languages; recognition then uses the installed dictionary and its input
+conversions. Only the lookup copy is composed; source text and byte ranges stay unchanged.
 
 The French compound fallback requires every internal hyphen-separated component
 to be nonempty. `porte--monnaie` and `va--t-il` can therefore be reported instead
