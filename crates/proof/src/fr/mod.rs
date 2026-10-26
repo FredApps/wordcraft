@@ -96,18 +96,29 @@ pub fn is_correct(word: &str) -> bool {
     is_correct_with(&dictionary(), word)
 }
 
+/// [`is_correct`] with the File › Options › Proofing choices. Disabling either ignore
+/// option checks the corresponding words against the French dictionary.
+pub fn is_correct_with_options(word: &str, opts: &crate::Options) -> bool {
+    check(&dictionary(), word, opts)
+}
+
 /// [`is_correct`] against a given dictionary (an empty one accepts everything).
 pub fn is_correct_with(d: &AffixDict, word: &str) -> bool {
+    check(d, word, &crate::Options::default())
+}
+
+/// [`is_correct_with_options`] against a given dictionary.
+fn check(d: &AffixDict, word: &str, opts: &crate::Options) -> bool {
     if d.is_empty() {
         return true; // no French dictionary installed: no spelling marks
     }
     let w = word.trim_matches(|c: char| !c.is_alphanumeric() && !crate::is_combining_mark(c) && c != '\'' && c != '’');
     let w = w.trim_matches(['\'', '’']).replace('’', "'");
     let n = w.chars().count();
-    if n <= 1 || w.chars().any(|c| c.is_ascii_digit()) || !w.chars().any(char::is_alphabetic) {
+    if n <= 1 || (opts.ignore_numbers && w.chars().any(|c| c.is_ascii_digit())) || !w.chars().any(char::is_alphabetic) {
         return true;
     }
-    if w.chars().all(|c| !c.is_lowercase()) && n <= 6 {
+    if opts.ignore_uppercase && w.chars().all(|c| !c.is_lowercase()) && n <= 6 {
         return true;
     }
     if !w.chars().any(is_latin_letter) {
@@ -223,6 +234,36 @@ mod tests {
         for w in ["l'hasard", "l'chat", "l'arbres", "l'arbrre", "qu'maison"] {
             assert!(!is_correct(w), "{w}");
         }
+    }
+
+    /// File › Options must reach both French regions and the actual spelling issues.
+    #[test]
+    fn proofing_options_reach_the_french_check() {
+        test_dict::install();
+        let defaults = crate::Options::default();
+        let check_caps = crate::Options { ignore_uppercase: false, ..defaults };
+        let check_digits = crate::Options { ignore_numbers: false, ..defaults };
+        let strict = crate::Options { ignore_uppercase: false, ignore_numbers: false, ..defaults };
+        for lang in [crate::ProofLang::Fr, crate::ProofLang::FrCa] {
+            assert!(crate::is_correct_in_with("SNCF", lang, &defaults));
+            assert!(!crate::is_correct_in_with("SNCF", lang, &check_caps));
+            assert!(crate::is_correct_in_with("MAISON", lang, &check_caps));
+            assert!(crate::is_correct_in_with("mp3x", lang, &defaults));
+            assert!(!crate::is_correct_in_with("mp3x", lang, &check_digits));
+            assert!(crate::is_correct_in_with("2026", lang, &strict), "numbers alone stay correct");
+            assert!(crate::is_correct_in_with("SNCF", lang, &check_digits), "the uppercase option is independent");
+            assert!(crate::is_correct_in_with("mp3x", lang, &check_caps), "the numbers option is independent");
+            let text = "école SNCF mp3x";
+            let spans = [(0..text.len(), lang)];
+            assert!(crate::check_text_with(text, &spans, &defaults, false, false).is_empty());
+            let issues = crate::check_text_with(text, &spans, &strict, false, false);
+            let flagged: Vec<_> = issues.iter().map(|i| (&text[i.start..i.end], i.lang)).collect();
+            assert_eq!(flagged, [("SNCF", lang), ("mp3x", lang)]);
+        }
+        assert!(!is_correct_with_options("SNCF", &check_caps));
+        assert!(!is_correct_with_options("mp3x", &check_digits));
+        assert!(is_correct("SNCF") && is_correct("mp3x"), "direct checks keep the defaults");
+        assert!(check(&AffixDict::default(), "SNCF", &strict), "missing tools produce no spelling marks");
     }
 
     #[test]

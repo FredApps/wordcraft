@@ -809,7 +809,7 @@ pub fn is_correct_in_with(word: &str, lang: ProofLang, opts: &Options) -> bool {
         }
         ProofLang::Cs => accepted_by_options(word, opts) || cs::is_correct_with_options(word, opts),
         ProofLang::Id => accepted_by_options(word, opts) || id::is_correct_with_options(word, opts),
-        ProofLang::Fr | ProofLang::FrCa => accepted_by_options(word, opts) || fr::is_correct(word),
+        ProofLang::Fr | ProofLang::FrCa => accepted_by_options(word, opts) || fr::is_correct_with_options(word, opts),
         ProofLang::Bg | ProofLang::De | ProofLang::Other => true,
     }
 }
