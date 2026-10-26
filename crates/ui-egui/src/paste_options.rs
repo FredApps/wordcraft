@@ -112,11 +112,11 @@ pub fn show(app: &mut WordApp, ctx: &Context) {
     let current = wordcraft_engine::cmd::paste::paste_mode(&app.session);
     let mut chosen = None;
     let mut button_rect = egui::Rect::NOTHING;
-    egui::Area::new(egui::Id::new("wc_paste_options")).order(Order::Foreground).fixed_pos(at).show(ctx, |ui| {
+    egui::Area::new(egui::Id::unique("wc_paste_options")).order(Order::Foreground).fixed_pos(at).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).fill(t.menu).inner_margin(2.0).show(ui, |ui| {
             let (rect, resp) = ui.allocate_exact_size(vec2(BUTTON_W, BUTTON_H), Sense::click());
             // Screen readers (and tests) find the button by its name; its icon and "(Ctrl)" are drawn.
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!("Paste Options")));
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Paste Options")));
             button_rect = rect;
             if resp.hovered() || app.paste_options.open {
                 ui.painter().rect_filled(rect, 3.0, t.hover);
@@ -138,7 +138,7 @@ pub fn show(app: &mut WordApp, ctx: &Context) {
         // Open downwards, or upwards when the room below the button is short.
         let menu_h = offered.len() as f32 * 26.0 + 16.0;
         let below = ctx.content_rect().max.y - (button_rect.max.y + 6.0) >= menu_h;
-        let area = egui::Area::new(egui::Id::new("wc_paste_options_menu")).order(Order::Foreground);
+        let area = egui::Area::new(egui::Id::unique("wc_paste_options_menu")).order(Order::Foreground);
         let area = if below {
             area.fixed_pos(pos2(at.x, button_rect.max.y + 6.0))
         } else {
