@@ -7,7 +7,9 @@ on:
       - 'crates/proof/**'
       - 'assets/hyphenation/fr.pat'
       - 'crates/engine/src/cmd/review.rs'
+      - 'crates/engine/src/cmd/review/**'
       - 'crates/engine/src/tests.rs'
+      - 'crates/engine/src/tests/**'
       - 'docs/french-proofing.md'
       - 'docs/spelling-dictionaries.md'
       - '.github/workflows/french-proofing.yml'
@@ -18,7 +20,9 @@ on:
       - 'crates/proof/**'
       - 'assets/hyphenation/fr.pat'
       - 'crates/engine/src/cmd/review.rs'
+      - 'crates/engine/src/cmd/review/**'
       - 'crates/engine/src/tests.rs'
+      - 'crates/engine/src/tests/**'
       - 'docs/french-proofing.md'
       - 'docs/spelling-dictionaries.md'
       - '.github/workflows/french-proofing.yml'
@@ -92,4 +96,13 @@ jobs:
         run: cargo test --locked -p wordcraft-proof --test french_dictionary -- --ignored
 
       - name: Review commands in French
-        run: cargo test --locked -p wordcraft-engine --lib french_proofing_through_the_review_commands
+        shell: python
+        run: |
+          import subprocess
+          command = ["cargo", "test", "--locked", "-p", "wordcraft-engine", "--lib", "french_proofing_through_the_review_commands"]
+          listed = subprocess.run(command + ["--", "--list"], check=True, capture_output=True, text=True)
+          print(listed.stdout)
+          matches = [line for line in listed.stdout.splitlines() if line.endswith(": test") and "french_proofing_through_the_review_commands" in line]
+          if len(matches) != 1:
+              raise RuntimeError(f"Expected exactly one French Review regression, found {len(matches)}")
+          subprocess.run(command, check=True)
