@@ -895,6 +895,46 @@ mod tests {
         assert!(aligns.iter().filter(|(k, _)| *k == "cell").all(|(_, a)| *a != Some(wordcraft_doc::Align::Center)), "{aligns:?}");
     }
 
+    /// The offer does not depend on how deep the undo history is: with the history full (steps
+    /// evicted, its length constant) a paste still offers Paste Options, and changing it works.
+    #[test]
+    fn the_offer_stands_when_the_undo_history_is_full() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        for i in 0..520 {
+            s.run("text.insert", &json!({"text": "x"})).unwrap();
+            s.run("format.bold", &json!({"value": i % 2 == 0})).unwrap();
+        }
+        assert!(s.undo_steps_so_far() > 500, "steps were evicted: {}", s.undo_steps_so_far());
+        let html = "<p><b>Hello</b> <i>world</i></p><p>Second</p>";
+        s.run("edit.paste", &json!({"text": "Hello world\nSecond", "html": html})).unwrap();
+        assert!(!paste_options(&s).is_empty(), "the offer shows with a full history");
+        s.run("edit.pasteChange", &json!({"mode": "text"})).unwrap();
+        assert_eq!(paste_mode(&s), Some("text"));
+        s.run("edit.pasteChange", &json!({"mode": "source"})).unwrap();
+        assert_eq!(paste_mode(&s), Some("source"));
+    }
+
+    /// Copying something else after a paste does not spoil changing it: the offer keeps the
+    /// pasted content itself, not the clipboard's.
+    #[test]
+    fn changing_a_paste_survives_a_copy_made_after_it() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        let html = "<p><b>Bold start</b> tail</p><p>Two</p>";
+        s.run("edit.paste", &json!({"text": "Bold start tail\nTwo", "html": html})).unwrap();
+        let end = s.sel.clone();
+        // Something else is copied while the offer stands: the caret and the document stay.
+        s.run("select.all", &json!({})).unwrap();
+        s.run("edit.copy", &json!({})).unwrap();
+        s.sel = end;
+        assert!(!paste_options(&s).is_empty(), "copying does not end the offer");
+        s.run("edit.pasteChange", &json!({"mode": "merge"})).unwrap();
+        let text = s.doc.plain_text(wordcraft_doc::StoryRef::Body);
+        assert!(text.contains("Bold start tail") && text.contains("Two"), "{text:?}");
+        s.run("edit.pasteChange", &json!({"mode": "source"})).unwrap();
+        let first = s.doc.para_at(&s.doc.start_of(wordcraft_doc::StoryRef::Body)).unwrap();
+        assert!(first.runs.iter().any(|r| r.props.bold == Some(true)), "the source's bold is back: {:?}", first.runs);
+    }
+
     /// Picture at the start of a document puts the paragraph the paste restyled back.
     #[test]
     fn a_picture_restores_the_destination_paragraph() {
