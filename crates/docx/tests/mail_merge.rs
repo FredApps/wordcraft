@@ -249,6 +249,43 @@ fn source_elements_require_ids_and_their_own_relationship_types() {
 }
 
 #[test]
+fn aliased_mail_merge_without_source_ids_is_written_once() {
+    for namespace in [W, "http://purl.oclc.org/ooxml/wordprocessingml/main"] {
+        for merge in [
+            format!(r#"<x:mailMerge xmlns:x="{namespace}"><x:mainDocumentType x:val="formLetters"/></x:mailMerge>"#),
+            format!(r#"<mailMerge xmlns="{namespace}" xmlns:x="{namespace}"><mainDocumentType x:val="formLetters"/></mailMerge>"#),
+        ] {
+            // Keep the ordinary settings root and an unowned sibling, so the original part
+            // is merged rather than replaced. The child declares its own namespace alias.
+            let unrelated = r#"<x:mailMerge xmlns:x="urn:original:unrelated"/>"#;
+            let settings = format!("{merge}<w:doNotAutoCompressPictures/>{unrelated}");
+            let mut doc = wordcraft_docx::read(&fixture(&settings, "")).unwrap();
+            for _ in 0..2 {
+                let saved = wordcraft_docx::write(&doc).unwrap();
+                let settings = part(&saved, "word/settings.xml");
+                let mut reader = quick_xml::NsReader::from_str(&settings);
+                let mut count = 0;
+                loop {
+                    let (namespace, event) = reader.read_resolved_event().unwrap();
+                    match event {
+                        Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"mailMerge" => {
+                            count += usize::from(matches!(namespace, quick_xml::name::ResolveResult::Bound(ns) if ns.as_ref() == W.as_bytes()));
+                        }
+                        Event::Eof => break,
+                        _ => {}
+                    }
+                }
+                assert_eq!(count, 1, "{settings}");
+                assert_eq!(elements(&settings, "w:mainDocumentType")[0]["w:val"], "formLetters");
+                assert!(settings.contains("<w:doNotAutoCompressPictures/>"));
+                assert!(settings.contains(unrelated));
+                doc = wordcraft_docx::read(&saved).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
 fn strict_mail_merge_settings_keep_consistent_namespaces_through_two_saves() {
     const SW: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";
     const SR: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
