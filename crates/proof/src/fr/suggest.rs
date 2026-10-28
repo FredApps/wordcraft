@@ -308,15 +308,19 @@ fn suggest_plain(d: &AffixDict, word: &str, max: usize) -> Vec<String> {
     out
 }
 
-/// Prefer the input's casing only while every word stays suggestible. KEEPCASE can require
-/// the original candidate (including inside a split), so retain it when the conversion is invalid.
+/// Restore the input's case when every word is suggestible or its exact source allows recasing.
+/// KEEPCASE can require the original candidate, including inside a split, so keep that fallback.
 fn cased_suggestion(d: &AffixDict, text: String, case: Casing, uppercase: bool) -> Option<String> {
     let cased = match case {
         Casing::Initial => capitalize(&text),
         Casing::Upper if uppercase => text.to_uppercase(),
         _ => text.clone(),
     };
-    [cased, text].into_iter().find(|candidate| candidate.split(' ').all(|part| d.can_suggest(part)))
+    if text.split(' ').zip(cased.split(' ')).all(|(original, changed)| d.can_suggest(changed) || d.can_recase_suggestion(original)) {
+        return Some(cased);
+    }
+    let valid_original = text.split(' ').all(|part| d.can_suggest(part));
+    valid_original.then_some(text)
 }
 
 /// Round 6: rank the stems starting with the word's first letter (or a MAP relative of it, either
@@ -386,8 +390,8 @@ mod tests {
     }
 
     fn casing_dictionary() -> AffixDict {
-        let aff = "SET UTF-8\nKEEPCASE K\nNOSUGGEST N\nFORBIDDENWORD F\nREP 7\nREP mcdoonald McDonald\nREP iphonne iPhone\nREP nomcompose pour_McDonald\nREP nomsecret pour_secret\nREP nominterdit pour_interdit\nREP maisson maison\nREP eecole école\n";
-        AffixDict::from_hunspell(aff, "7\nMcDonald/K\niPhone/K\npour\nmaison\nécole\nsecret/N\ninterdit/F\n", &[]).unwrap()
+        let aff = "SET UTF-8\nKEEPCASE K\nNOSUGGEST N\nFORBIDDENWORD F\nSFX A Y 1\nSFX A 0 s .\nREP 7\nREP mcdoonald McDonald\nREP iphonne iPhone\nREP nomcompose pour_McDonald\nREP nomsecret pour_secret\nREP nominterdit pour_interdit\nREP maisson maison\nREP eecole école\n";
+        AffixDict::from_hunspell(aff, "8\nMcDonald/KA\niPhone/K\npour\nmaison\nécole\nsecret/NA\ninterdit/FA\nmixCase/A\n", &[]).unwrap()
     }
 
     #[test]
@@ -395,9 +399,15 @@ mod tests {
         let d = casing_dictionary();
         assert!(d.can_suggest("McDonald") && !d.can_suggest("MCDONALD"));
         assert!(d.can_suggest("iPhone") && !d.can_suggest("IPhone") && !d.can_suggest("IPHONE"));
+        assert!(d.can_recase_suggestion("mixCase") && d.can_recase_suggestion("mixCases"));
+        assert!(!d.can_suggest("MIXCASE"), "output recasing permission must not alter the spelling checker");
+        for original in ["McDonald", "McDonalds", "iPhone", "secret", "secrets", "interdit", "interdits"] {
+            assert!(!d.can_recase_suggestion(original), "{original}");
+        }
         for (input, expected) in [
             ("MCDOONALD", "McDonald"),
-            ("MCDONALDD", "McDonald"), // Scan round rather than REP.
+            ("MCDONALDD", "McDonald"),   // Scan round rather than REP.
+            ("MCDONALDSX", "McDonalds"), // KEEPCASE is inherited from the affixed stem.
             ("Iphonne", "iPhone"),
             ("IPHONNE", "iPhone"),
             ("NOMCOMPOSE", "pour McDonald"),
@@ -414,7 +424,9 @@ mod tests {
     #[test]
     fn final_casing_keeps_ordinary_capitals_and_never_offers_restricted_parts() {
         let d = casing_dictionary();
-        for (input, expected) in [("MAISSON", "MAISON"), ("Maisson", "Maison"), ("EECOLE", "ÉCOLE")] {
+        for (input, expected) in
+            [("MAISSON", "MAISON"), ("Maisson", "Maison"), ("EECOLE", "ÉCOLE"), ("MIXCASX", "MIXCASE"), ("MIXCASESX", "MIXCASES")]
+        {
             assert_eq!(suggest_in(&d, input, 1), [expected], "{input}");
         }
         for input in ["NOMSECRET", "NOMINTERDIT", "SECRETT", "INTERDITT"] {
@@ -422,7 +434,7 @@ mod tests {
             assert!(out.iter().all(|s| s.split(' ').all(|part| d.can_suggest(part))), "{input}: {out:?}");
             assert!(!out.iter().any(|s| s.to_lowercase().contains("secret") || s.to_lowercase().contains("interdit")), "{input}: {out:?}");
         }
-        for invalid in ["pour secret", "pour interdit"] {
+        for invalid in ["pour secret", "pour secrets", "pour interdit", "pour interdits"] {
             assert!(cased_suggestion(&d, invalid.into(), Casing::Upper, true).is_none(), "{invalid}");
         }
     }

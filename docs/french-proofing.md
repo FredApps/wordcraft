@@ -26,8 +26,9 @@ and grammar, and hyphenation. `fr-CA` shares spelling and uses Quebec punctuatio
 Both the Review language menu and the Language dialog offer French (France) and French (Canada).
 Bare French defaults to France. Region labels read only the region slot after the language
 and optional script; calendar/private-use extension keys cannot turn France into Canada.
-Final suggestion casing is validated against the dictionary, preserving a permitted original
-case when the requested capitalization would violate KEEPCASE or other suggestion restrictions.
+Final suggestion casing respects KEEPCASE and other suggestion restrictions, preserving a
+permitted original case when conversion is disallowed. Ordinary mixed-case entries retain
+their established recasing behavior; this display permission does not alter spelling lookup.
 Loading the French dictionary holds the cache write lock, so
 a concurrent reload waits for that load and clears its result before the next lookup.
 New documents under the French interface take the French system region. Missing and unreadable

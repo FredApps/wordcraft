@@ -949,6 +949,14 @@ impl AffixDict {
         self.check_with(w, self.forbidden.union(self.no_suggest))
     }
 
+    /// May this exact, already-collected suggestion have its display case restored? Only
+    /// caller-controlled first-letter or all-uppercase conversion may use this permission;
+    /// it does not validate an arbitrary target. KEEPCASE, NOSUGGEST and forbidden sources
+    /// cannot grant it. The normal spelling checker remains unchanged.
+    pub(crate) fn can_recase_suggestion(&self, original: &str) -> bool {
+        self.contains_with(original, self.forbidden.union(self.no_suggest).union(self.keep_case))
+    }
+
     /// [`AffixDict::check`], with stems carrying a flag of `reject` left out.
     fn check_with(&self, w: &str, reject: FlagSet) -> bool {
         let w = self.input_conv(w);
