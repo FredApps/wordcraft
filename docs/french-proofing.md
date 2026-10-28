@@ -1,6 +1,6 @@
 # Shipping and improving French proofing
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-28 · **Change:** minor (French dictionary reload, regional language choices and dictionary-valid suggestion casing); previously minor (French uppercase/number proofing options and review-record corrections); previously minor (integration with current main, shared NFC lookup and external interface catalogs); previously minor (French spelling keeps attached combining marks and checks compound boundaries); previously minor (French proofing region parser respects extension boundaries); previously minor (French dictionary recovery and regional labels); previously trivial (French hyphenation CI path coverage); previously minor (historical affix compatibility gates and pinned French CI toolchain); previously major (French integration and regression gates, based on #1660)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-28 · **Change:** minor (French dictionary reload, regional language choices and dictionary-respecting suggestion casing); previously minor (French uppercase/number proofing options and review-record corrections); previously minor (integration with current main, shared NFC lookup and external interface catalogs); previously minor (French spelling keeps attached combining marks and checks compound boundaries); previously minor (French proofing region parser respects extension boundaries); previously minor (French dictionary recovery and regional labels); previously trivial (French hyphenation CI path coverage); previously minor (historical affix compatibility gates and pinned French CI toolchain); previously major (French integration and regression gates, based on #1660)
 
 ## Shared-engine compatibility and reproducible CI
 
@@ -29,6 +29,8 @@ and optional script; calendar/private-use extension keys cannot turn France into
 Final suggestion casing respects KEEPCASE and other suggestion restrictions, preserving a
 permitted original case when conversion is disallowed. Ordinary mixed-case entries retain
 their established recasing behavior; this display permission does not alter spelling lookup.
+A final form explicitly excluded from suggestions cannot bypass that restriction through
+a source recasing permission, including dictionary input-conversion aliases.
 Loading the French dictionary holds the cache write lock, so
 a concurrent reload waits for that load and clears its result before the next lookup.
 New documents under the French interface take the French system region. Missing and unreadable

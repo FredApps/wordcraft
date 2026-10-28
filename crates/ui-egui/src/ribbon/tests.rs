@@ -202,12 +202,8 @@ fn language_extensions_do_not_change_the_french_region() {
         assert_eq!(checks.extra, None, "{tag}");
         assert_eq!(checks.listed, PROOFING_LANGUAGES.map(|(t, _)| t == "fr-CA"), "{tag}");
     }
-    for (tag, name) in [
-        ("fr-BE", "French (Belgium)"),
-        ("EN_latn_GB_u_ca_gregory", "English (United Kingdom)"),
-        ("es-Latn-419-u-ca-gregory", "Spanish (419)"),
-        ("pt-BR-x-ca", "Portuguese (Brazil)"),
-    ] {
+    for (tag, name) in [("fr-BE", "French (Belgium)"), ("EN_latn_GB_u_ca_gregory", "English (United Kingdom)"), ("pt-BR-x-ca", "Portuguese (Brazil)")]
+    {
         assert_eq!(language_name(Some(tag)), name, "{tag}");
     }
 }

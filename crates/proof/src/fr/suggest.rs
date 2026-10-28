@@ -316,10 +316,10 @@ fn cased_suggestion(d: &AffixDict, text: String, case: Casing, uppercase: bool) 
         Casing::Upper if uppercase => text.to_uppercase(),
         _ => text.clone(),
     };
-    if text.split(' ').zip(cased.split(' ')).all(|(original, changed)| d.can_suggest(changed) || d.can_recase_suggestion(original)) {
+    if text.split(' ').zip(cased.split(' ')).all(|(original, changed)| d.can_suggest_cased(original, changed)) {
         return Some(cased);
     }
-    let valid_original = text.split(' ').all(|part| d.can_suggest(part));
+    let valid_original = text.split(' ').all(|part| d.can_suggest_cased(part, part));
     valid_original.then_some(text)
 }
 
@@ -399,10 +399,10 @@ mod tests {
         let d = casing_dictionary();
         assert!(d.can_suggest("McDonald") && !d.can_suggest("MCDONALD"));
         assert!(d.can_suggest("iPhone") && !d.can_suggest("IPhone") && !d.can_suggest("IPHONE"));
-        assert!(d.can_recase_suggestion("mixCase") && d.can_recase_suggestion("mixCases"));
+        assert!(d.can_suggest_cased("mixCase", "MIXCASE") && d.can_suggest_cased("mixCases", "MIXCASES"));
         assert!(!d.can_suggest("MIXCASE"), "output recasing permission must not alter the spelling checker");
         for original in ["McDonald", "McDonalds", "iPhone", "secret", "secrets", "interdit", "interdits"] {
-            assert!(!d.can_recase_suggestion(original), "{original}");
+            assert!(!d.can_suggest_cased(original, &original.to_uppercase()), "{original}");
         }
         for (input, expected) in [
             ("MCDOONALD", "McDonald"),
@@ -436,6 +436,56 @@ mod tests {
         }
         for invalid in ["pour secret", "pour secrets", "pour interdit", "pour interdits"] {
             assert!(cased_suggestion(&d, invalid.into(), Casing::Upper, true).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn final_casing_rejects_marked_target_stems_and_affixes() {
+        for flag in ["N", "F"] {
+            let aff = "SET UTF-8\nNOSUGGEST N\nFORBIDDENWORD F\nSFX A Y 1\nSFX A 0 s .\nSFX B Y 1\nSFX B 0 S .\n";
+            let dic = format!("5\nmixCase/A\nMIXCASE/{flag}B\nnormal/A\nNORMAL/{flag}B\npour\n");
+            let d = AffixDict::from_hunspell(aff, &dic, &[]).unwrap();
+            // The full checker can accept this through lower-case normal; exact exclusion
+            // still takes priority when producing the displayed suggestion.
+            assert!(d.can_suggest("NORMAL"));
+            for (original, target) in [("mixCase", "MIXCASE"), ("mixCases", "MIXCASES"), ("normal", "NORMAL"), ("normals", "NORMALS")] {
+                assert!(!d.can_suggest_cased(original, target), "{flag}: {original} → {target}");
+                assert!(!d.can_suggest_cased(target, target), "{flag}: {target}");
+                assert_eq!(cased_suggestion(&d, original.into(), Casing::Upper, true).as_deref(), Some(original));
+            }
+            for (input, original, excluded) in
+                [("MIXCASX", "mixCase", "MIXCASE"), ("MIXCASESX", "mixCases", "MIXCASES"), ("NORRMAL", "normal", "NORMAL")]
+            {
+                let out = suggest_in(&d, input, 6);
+                assert!(out.iter().any(|s| s == original), "{flag}: {input}: {out:?}");
+                assert!(!out.iter().any(|s| s == excluded), "{flag}: {input}: {out:?}");
+            }
+            assert_eq!(cased_suggestion(&d, "pour mixCase".into(), Casing::Upper, true).as_deref(), Some("pour mixCase"));
+            assert!(!d.can_suggest_cased("normal", "pour"), "a valid but unrelated target is not a case conversion");
+        }
+    }
+
+    #[test]
+    fn final_casing_honours_input_aliases_and_suggestible_homonyms() {
+        for flag in ["N", "F"] {
+            let aff = "SET UTF-8\nNOSUGGEST N\nFORBIDDENWORD F\nICONV 1\nICONV NORMAL HIDDEN\n";
+            let dic = format!("2\nnormal\nHIDDEN/{flag}\n");
+            let d = AffixDict::from_hunspell(aff, &dic, &[]).unwrap();
+            assert!(!d.can_suggest_cased("normal", "NORMAL"), "{flag}");
+            assert!(!d.can_suggest_cased("NORMAL", "NORMAL"), "{flag}");
+            assert_eq!(cased_suggestion(&d, "normal".into(), Casing::Upper, true).as_deref(), Some("normal"));
+            assert!(cased_suggestion(&d, "NORMAL".into(), Casing::Upper, true).is_none());
+        }
+        let aliased = AffixDict::from_hunspell("SET UTF-8\nKEEPCASE K\nICONV 1\nICONV mixCase iPhone\n", "2\nmixCase\niPhone/K\n", &[]).unwrap();
+        assert!(!aliased.can_suggest_cased("mixCase", "MIXCASE"), "the source's alias requires KEEPCASE");
+        assert!(aliased.can_suggest_cased("mixCase", "mixCase"), "the valid alias is kept as written");
+        assert_eq!(cased_suggestion(&aliased, "mixCase".into(), Casing::Upper, true).as_deref(), Some("mixCase"));
+
+        let aff = "SET UTF-8\nNOSUGGEST N\nSFX A Y 1\nSFX A 0 s .\nSFX B Y 1\nSFX B 0 S .\n";
+        let d = AffixDict::from_hunspell(aff, "3\nmixCase/A\nMIXCASE/NB\nMIXCASE/B\n", &[]).unwrap();
+        for (original, target) in [("mixCase", "MIXCASE"), ("mixCases", "MIXCASES")] {
+            assert!(d.can_suggest_cased(original, target), "an ordinary homonym keeps {target} suggestible");
+            assert_eq!(cased_suggestion(&d, original.into(), Casing::Upper, true).as_deref(), Some(target));
         }
     }
 

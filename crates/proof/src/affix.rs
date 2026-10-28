@@ -949,12 +949,25 @@ impl AffixDict {
         self.check_with(w, self.forbidden.union(self.no_suggest))
     }
 
-    /// May this exact, already-collected suggestion have its display case restored? Only
-    /// caller-controlled first-letter or all-uppercase conversion may use this permission;
-    /// it does not validate an arbitrary target. KEEPCASE, NOSUGGEST and forbidden sources
-    /// cannot grant it. The normal spelling checker remains unchanged.
-    pub(crate) fn can_recase_suggestion(&self, original: &str) -> bool {
-        self.contains_with(original, self.forbidden.union(self.no_suggest).union(self.keep_case))
+    /// Validate display casing of an already-collected suggestion: identity, first-letter or
+    /// all-uppercase conversion only, never an arbitrary replacement. A target's exact paths
+    /// after ICONV must not be exclusively NOSUGGEST or forbidden, even when case fallback
+    /// would accept it. Otherwise keep normal suggestion checks, or the existing permission
+    /// to recase a source without KEEPCASE/NOSUGGEST/forbidden flags. The spelling checker is
+    /// unchanged; source permissions also use ICONV, and cannot authorize an identity fallback.
+    pub(crate) fn can_suggest_cased(&self, original: &str, cased: &str) -> bool {
+        if original.len() > MAX_WORD_BYTES || cased.len() > MAX_WORD_BYTES {
+            return false;
+        }
+        if cased != original && cased != capitalize(original) && cased != original.to_uppercase() {
+            return false;
+        }
+        let reject = self.forbidden.union(self.no_suggest);
+        let target = self.input_conv(cased);
+        if self.contains_with(target.as_ref(), FlagSet::default()) && !self.contains_with(target.as_ref(), reject) {
+            return false;
+        }
+        self.can_suggest(cased) || (original != cased && self.contains_with(self.input_conv(original).as_ref(), reject.union(self.keep_case)))
     }
 
     /// [`AffixDict::check`], with stems carrying a flag of `reject` left out.
