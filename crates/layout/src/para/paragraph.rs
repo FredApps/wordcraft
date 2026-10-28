@@ -399,6 +399,19 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
         found.sort_unstable();
         found.dedup();
     }
+    // Thai and Lao have no spaces between words: replace UAX #14's per-character SA breaks with
+    // ICU4X dictionary word boundaries.
+    if text.chars().any(wordcraft_doc::cluster::is_thai_lao) {
+        found.retain(|&i| {
+            let prev = text.get(..i).and_then(|s| s.chars().next_back());
+            let next = text.get(i..).and_then(|s| s.chars().next());
+            !matches!((prev, next), (Some(p), Some(n))
+                if wordcraft_doc::cluster::is_thai_lao(p) && wordcraft_doc::cluster::is_thai_lao(n))
+        });
+        found.extend(wordcraft_doc::cluster::thai_lao_breaks(&text));
+        found.sort_unstable();
+        found.dedup();
+    }
     // Asian typography: kinsoku and breaking Latin words anywhere.
     crate::kinsoku::apply(&text, &mut found, rp.kinsoku, rp.word_wrap);
     let opps: std::collections::HashSet<usize> = found.into_iter().filter_map(to_para).collect();
