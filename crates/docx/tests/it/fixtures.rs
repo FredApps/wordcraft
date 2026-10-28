@@ -2037,6 +2037,23 @@ fn theme_colour_wins_over_the_fixed_colour() {
     assert!(near(Some(TextColor::Rgb(fill)), Rgb(0xFB, 0xE4, 0xD5)), "{fill:?}");
 }
 
+/// `w:shd w:val="nil"` paints nothing despite its fill: a CV template's red cell showed over the name.
+#[test]
+fn nil_shading_paints_no_fill() {
+    let body = r#"
+<w:tbl><w:tblGrid><w:gridCol w:w="200"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr>
+ <w:tc><w:tcPr><w:shd w:val="nil" w:color="auto" w:fill="C00000"/></w:tcPr><w:p/></w:tc>
+ <w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="C00000"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>
+<w:p><w:pPr><w:shd w:val="nil" w:fill="C00000" w:themeFill="accent2"/></w:pPr><w:r><w:rPr><w:shd w:val="nil" w:color="C00000" w:fill="C00000"/></w:rPr><w:t>x</w:t></w:r></w:p>"#;
+    let d = read_body(body);
+    let Block::Table(t) = &*d.body[0] else { panic!("table first") };
+    assert_eq!(t.rows[0].cells[0].props.shading, None);
+    assert_eq!(t.rows[0].cells[1].props.shading, Some(Rgb(0xC0, 0, 0)));
+    let p = paras(&d);
+    assert_eq!(p[0].props.shading, None);
+    assert_eq!(p[0].props_of_char(0).shading, None);
+}
+
 #[test]
 fn theme_colours_follow_the_colour_scheme_mapping() {
     // Styles are read before settings; the mapping still applies to them.

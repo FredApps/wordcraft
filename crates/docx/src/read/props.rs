@@ -208,6 +208,10 @@ impl PropCtx {
 
     /// `w:shd`: its fill colour (a theme fill first), or a solid pattern's colour.
     pub fn shd_fill(&self, e: &El) -> Option<Rgb> {
+        // `nil` counts as no shading, whatever fill it carries (MS-OI29500 17.18.78).
+        if e.attr("w:val") == Some("nil") {
+            return None;
+        }
         if let Some(c) = self.theme_color(e, "w:themeFill", "w:themeFillTint", "w:themeFillShade") {
             return Some(c);
         }
