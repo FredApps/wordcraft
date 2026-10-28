@@ -33,13 +33,17 @@ const NAMES: &[&str] = &["fr_FR", "fr", "fr-FR", "fr_BE", "fr_CA", "fr_CH", "fr_
 /// [`install_dictionary`], or an empty one when none is available (French spelling is off
 /// then; see [`has_dictionary`]).
 pub fn dictionary() -> Arc<AffixDict> {
-    if let Some(d) = DICT.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        return d.clone();
+    cached_dictionary(&DICT, load_installed)
+}
+
+/// Initialize an empty cache while holding its write lock, so a concurrent reload clears the
+/// completed load instead of allowing an old-folder result to be published after the reload.
+fn cached_dictionary(cache: &RwLock<Option<Arc<AffixDict>>>, load: impl FnOnce() -> AffixDict) -> Arc<AffixDict> {
+    if let Some(d) = cache.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        return Arc::clone(d);
     }
-    let loaded = Arc::new(load_installed());
-    let mut slot = DICT.write().unwrap_or_else(|e| e.into_inner());
-    // Another thread (or an install) may have filled it meanwhile: that one wins.
-    slot.get_or_insert(loaded).clone()
+    let mut slot = cache.write().unwrap_or_else(|e| e.into_inner());
+    Arc::clone(slot.get_or_insert_with(|| Arc::new(load())))
 }
 
 fn load_installed() -> AffixDict {
@@ -147,6 +151,62 @@ fn known(d: &AffixDict, w: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reload concurrent with a suspended load must clear its result. A local cache avoids
+    /// interfering with the installed dictionaries used by other tests, and channels force the
+    /// interleaving without sleeps. Completion waits are bounded even if a regression deadlocks.
+    #[test]
+    fn dictionary_load_is_serialized_with_reload() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let timeout = Duration::from_secs(10);
+        let cache = Arc::new(RwLock::new(None));
+        let old = AffixDict::from_hunspell("SET UTF-8\n", "1\nancien\n", &[]).unwrap();
+        let new = AffixDict::from_hunspell("SET UTF-8\n", "1\nnouveau\n", &[]).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (loaded_tx, loaded_rx) = mpsc::channel();
+        let loading_cache = Arc::clone(&cache);
+        let loading = std::thread::spawn(move || {
+            let loaded = cached_dictionary(&loading_cache, || {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(timeout).unwrap();
+                old
+            });
+            loaded_tx.send(loaded).unwrap();
+        });
+        started_rx.recv_timeout(timeout).unwrap();
+        let loading_holds_write_lock = cache.try_write().is_err();
+        let (reload_started_tx, reload_started_rx) = mpsc::channel();
+        let (reloaded_tx, reloaded_rx) = mpsc::channel();
+        let reloading_cache = Arc::clone(&cache);
+        let reloading = std::thread::spawn(move || {
+            reload_started_tx.send(()).unwrap();
+            // This is reload_dictionary's cache-clear operation, on the isolated cache.
+            *reloading_cache.write().unwrap() = None;
+            reloaded_tx.send(()).unwrap();
+        });
+        reload_started_rx.recv_timeout(timeout).unwrap();
+        // If loading regresses to outside the lock, force the stale-publication order rather
+        // than relying on scheduling luck: reload finishes before the old load can publish.
+        if !loading_holds_write_lock {
+            reloaded_rx.recv_timeout(timeout).unwrap();
+        }
+        release_tx.send(()).unwrap();
+        let old = loaded_rx.recv_timeout(timeout).unwrap();
+        if loading_holds_write_lock {
+            reloaded_rx.recv_timeout(timeout).unwrap();
+        }
+        loading.join().unwrap();
+        reloading.join().unwrap();
+        assert!(loading_holds_write_lock, "reload must wait for the in-progress load");
+        assert!(old.check("ancien"));
+        assert!(cache.read().unwrap().is_none(), "reload clears the completed old-folder load");
+        let current = cached_dictionary(&cache, || new);
+        assert!(current.check("nouveau") && !current.check("ancien"), "the next check loads the replacement dictionary");
+        assert!(!Arc::ptr_eq(&old, &current));
+    }
 
     #[test]
     fn test_dictionary_loads() {

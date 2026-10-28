@@ -1,6 +1,6 @@
 # Shipping and improving French proofing
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-26 · **Change:** minor (French uppercase/number proofing options and review-record corrections); previously minor (integration with current main, shared NFC lookup and external interface catalogs); previously minor (French spelling keeps attached combining marks and checks compound boundaries); previously minor (French proofing region parser respects extension boundaries); previously minor (French dictionary recovery and regional labels); previously trivial (French hyphenation CI path coverage); previously minor (historical affix compatibility gates and pinned French CI toolchain); previously major (French integration and regression gates, based on #1660)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-28 · **Change:** minor (serialized French dictionary reload and explicit Canadian French language choices); previously minor (French uppercase/number proofing options and review-record corrections); previously minor (integration with current main, shared NFC lookup and external interface catalogs); previously minor (French spelling keeps attached combining marks and checks compound boundaries); previously minor (French proofing region parser respects extension boundaries); previously minor (French dictionary recovery and regional labels); previously trivial (French hyphenation CI path coverage); previously minor (historical affix compatibility gates and pinned French CI toolchain); previously major (French integration and regression gates, based on #1660)
 
 ## Shared-engine compatibility and reproducible CI
 
@@ -23,6 +23,9 @@ Install it using [spelling-dictionaries.md](spelling-dictionaries.md).
 
 The baseline includes spelling, accent and apostrophe suggestions, conservative French typography
 and grammar, and hyphenation. `fr-CA` shares spelling and uses Quebec punctuation conventions.
+Both the Review language menu and the Language dialog offer French (France) and French (Canada).
+Bare French defaults to France. Loading the French dictionary holds the cache write lock, so
+a concurrent reload waits for that load and clears its result before the next lookup.
 New documents under the French interface take the French system region. Missing and unreadable
 dictionaries are reported through the existing status-bar and Options diagnostics.
 
@@ -89,6 +92,7 @@ before proposing a suggestion/ranking change. Keep follow-ups independently revi
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | minor | French dictionary loading is serialized with cache invalidation; the Review menu and Language dialog offer French (Canada) explicitly while bare French keeps France as its default |
 | 2026-10-26 | minor | French dispatch honours the uppercase and number ignore options; regressions cover both regions, independent choices and original UTF-8 issue ranges; progress records aligned with the current integration |
 | 2026-10-25 | minor | Integration with current main preserves shared NFC lookup, other proofing languages, dictionary diagnostics and external interface catalogs |
 | 2026-10-20 | minor | Attached Unicode marks keep their original spelling ranges; French compound fallback rejects empty internal components while preserving explicit dictionary entries |

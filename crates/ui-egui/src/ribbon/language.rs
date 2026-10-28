@@ -1,7 +1,7 @@
 use super::{Ui, Value, WordApp, json, vec2};
 
 /// The proofing languages the Language menu offers: tag and English name (translated when drawn).
-pub(crate) const PROOFING_LANGUAGES: [(&str, &str); 17] = [
+pub(crate) const PROOFING_LANGUAGES: [(&str, &str); 18] = [
     ("en-US", "English (United States)"),
     ("en-GB", "English (United Kingdom)"),
     ("en-AU", "English (Australia)"),
@@ -15,6 +15,7 @@ pub(crate) const PROOFING_LANGUAGES: [(&str, &str); 17] = [
     ("cs-CZ", "Czech"),
     ("id-ID", "Indonesian"),
     ("fr-FR", "French (France)"),
+    ("fr-CA", "French (Canada)"),
     ("es-ES", "Spanish (Spain)"),
     ("es-MX", "Spanish (Mexico)"),
     ("es-419", "Spanish (Latin America)"),
