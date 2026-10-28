@@ -185,6 +185,33 @@ fn french_regions_are_in_both_language_pickers() {
     assert_eq!(checks.listed, PROOFING_LANGUAGES.map(|(tag, _)| tag == "fr-CA"));
 }
 
+/// A Unicode or private extension cannot turn French's calendar key into the Canadian region.
+#[test]
+fn language_extensions_do_not_change_the_french_region() {
+    for tag in ["fr", "fr-u-ca-gregory", "fr-Latn-u-ca-gregory", "fr-x-ca", "FR_u_CA_gregory", "FR_latn_u_CA_gregory", "FR_x_CA", "fr_FR.UTF-8"] {
+        assert_eq!(language_name(Some(tag)), "French (France)", "{tag}");
+        assert_eq!(wordcraft_engine::proof::ProofLang::from_tag(Some(tag)), wordcraft_engine::proof::ProofLang::Fr, "{tag}");
+        let checks = language_checks(tag, |_| false);
+        assert_eq!(checks.extra, None, "{tag}");
+        assert_eq!(checks.listed, PROOFING_LANGUAGES.map(|(t, _)| t == "fr-FR"), "{tag}");
+    }
+    for tag in ["fr-CA", "fr-Latn-CA", "fr-CA-u-ca-gregory", "fr-Latn-CA-x-fr", "FR_ca", "FR_latn_ca_u_CA_gregory", "fr_CA.UTF-8"] {
+        assert_eq!(language_name(Some(tag)), "French (Canada)", "{tag}");
+        assert_eq!(wordcraft_engine::proof::ProofLang::from_tag(Some(tag)), wordcraft_engine::proof::ProofLang::FrCa, "{tag}");
+        let checks = language_checks(tag, |_| false);
+        assert_eq!(checks.extra, None, "{tag}");
+        assert_eq!(checks.listed, PROOFING_LANGUAGES.map(|(t, _)| t == "fr-CA"), "{tag}");
+    }
+    for (tag, name) in [
+        ("fr-BE", "French (Belgium)"),
+        ("EN_latn_GB_u_ca_gregory", "English (United Kingdom)"),
+        ("es-Latn-419-u-ca-gregory", "Spanish (Latin America)"),
+        ("pt-BR-x-ca", "Portuguese (Brazil)"),
+    ] {
+        assert_eq!(language_name(Some(tag)), name, "{tag}");
+    }
+}
+
 /// The Englishes WordCraft proofs differently are in the menu, checked by their tags, and
 /// every English region has a name (#1281, #1045).
 #[test]

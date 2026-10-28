@@ -33,11 +33,15 @@ pub(crate) fn language_name(tag: Option<&str>) -> String {
     if let Some(name) = named(tag) {
         return name.to_string();
     }
-    let mut parts = tag.split(['-', '_']);
+    let mut parts = tag.split(['-', '_', '.']);
     let primary = parts.next().unwrap_or("");
-    // The region: the first two-letter or three-digit subtag after the language (and script).
-    let region =
-        parts.find(|p| (p.len() == 2 && p.chars().all(|c| c.is_ascii_alphabetic())) || (p.len() == 3 && p.chars().all(|c| c.is_ascii_digit())));
+    // A region follows the language and optional script, before variants or extensions.
+    // An extension's calendar key (the `ca` in `fr-u-ca-gregory`) is not a region.
+    let first = parts.next().unwrap_or("");
+    let region = if first.len() == 4 && first.chars().all(|c| c.is_ascii_alphabetic()) { parts.next().unwrap_or("") } else { first };
+    let region = ((region.len() == 2 && region.chars().all(|c| c.is_ascii_alphabetic()))
+        || (region.len() == 3 && region.chars().all(|c| c.is_ascii_digit())))
+    .then_some(region);
     match region {
         // A region the list doesn't have: the language's name without its own region or variant.
         Some(r) => {
