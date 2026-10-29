@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    Arc, BTreeMap, Blocks, Comment, ContentTypes, DocxError, El, HashMap, HashSet, MAX_PARTS, MAX_SOURCES, MAX_TEMPLATE_PATH, NoteKind, NumFormat,
+    Paragraph, PartKind, Reader, Rels, Seen, StoryCtx, Zoom, ZoomFit, int, math, on_off, para_block, props, tw, u32_of,
+};
 
 impl Reader<'_> {
     /// Keep only the referenced recipient leaf. Invalid or unkeepable inputs remain openable,
