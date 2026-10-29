@@ -2586,6 +2586,19 @@ fn figure_tags_keep_story_paths_and_reordered_pages() {
     let mut second = lay.pages[0].clone();
     second.items = vec![placed(StoryRef::Part(7), DocPath::top(0), 2), placed(StoryRef::Body, DocPath::top(0), 2)];
     lay.pages.push(second);
+    use hayro_syntax::content::ops::TypedInstruction;
+    use hayro_syntax::object::{Array, Dict, Name, String as PdfString};
+    // Read serialized structure elements rather than inferring their role from an alt string.
+    fn described<'a>(dict: Dict<'a>, out: &mut Vec<Dict<'a>>) {
+        if dict.get::<PdfString<'_>>(b"Alt").is_some() {
+            out.push(dict.clone());
+        }
+        if let Some(kids) = dict.get::<Array<'_>>(b"K") {
+            for child in kids.iter::<Dict<'_>>() {
+                described(child, out);
+            }
+        }
+    }
     for tagged in [true, false] {
         let bytes = export_layout(&d, &lay, &PdfOptions { tagged, compress: false, pages: Some(vec![1, 0, 1]), ..Default::default() }).unwrap();
         let raw = String::from_utf8_lossy(&bytes);
@@ -2594,5 +2607,41 @@ fn figure_tags_keep_story_paths_and_reordered_pages() {
         assert_eq!(raw.matches("/Alt(Part picture)").count(), if tagged { 2 } else { 0 });
         assert_eq!(raw.matches("/Alt(Cell diagram)").count(), usize::from(tagged));
         assert!(!raw.contains("/Alt(Decorative)"));
+        let pdf = hayro_syntax::Pdf::new(bytes.clone()).unwrap();
+        let catalog = pdf.xref().get::<Dict<'_>>(pdf.xref().root_id()).unwrap();
+        let tree = catalog.get::<Dict<'_>>(b"StructTreeRoot");
+        assert_eq!(tree.is_some(), tagged);
+        let mut figures = Vec::new();
+        if let Some(tree) = tree {
+            described(tree, &mut figures);
+        }
+        let expected = [["Part picture", "Body picture"], ["Cell diagram", "Body picture"], ["Part picture", "Body picture"]];
+        for (i, page) in pdf.pages().iter().enumerate() {
+            let alts: Vec<_> = figures
+                .iter()
+                .filter(|f| f.get::<Dict<'_>>(b"Pg").as_ref() == Some(page.raw()))
+                .map(|f| {
+                    assert_eq!(f.get::<Name<'_>>(b"S").as_deref(), Some(b"Figure".as_slice()), "described image/graphic role");
+                    pdf_text_string(f.get::<PdfString<'_>>(b"Alt").unwrap().as_bytes())
+                })
+                .collect();
+            assert_eq!(alts, if tagged { expected[i].to_vec() } else { Vec::new() }, "output page {i} alt sequence");
+            let mut marked = Vec::new();
+            let mut pictures = Vec::new();
+            let mut ops = page.typed_operations();
+            while let Some(op) = ops.next() {
+                match op {
+                    TypedInstruction::BeginMarkedContent(bmc) => marked.push(bmc.0.as_ref() == b"Artifact"),
+                    TypedInstruction::BeginMarkedContentWithProperties(bdc) => marked.push(bdc.0.as_ref() == b"Artifact"),
+                    TypedInstruction::EndMarkedContent(_) => {
+                        marked.pop();
+                    }
+                    TypedInstruction::XObject(_) => pictures.push(marked.contains(&true)),
+                    _ => {}
+                }
+            }
+            // Only output page 1 has the cached decorative picture, painted before the body figure.
+            assert_eq!(pictures, vec![tagged && i == 1, false], "cached picture Artifact roles on output page {i}");
+        }
     }
 }
