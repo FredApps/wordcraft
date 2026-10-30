@@ -256,6 +256,31 @@ mod tests {
         assert!(first.props.style.is_none() && first.runs.iter().all(|r| r.props.color.is_none()), "plain text in the destination's formatting");
     }
 
+    /// Choosing Picture for content too long to draw tells the person why on the status line, and
+    /// leaves the paste and its button as they were.
+    #[test]
+    fn a_refused_picture_says_why() {
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
+        a.run("view.commentsPane", serde_json::json!({"value": false})).unwrap();
+        let html: String = (0..200).map(|i| format!("<p><b>line {i}</b></p>")).collect();
+        let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        a.run("edit.paste", serde_json::json!({"text": text, "html": html})).unwrap();
+        let before = a.session.doc.plain_text(wordcraft_doc::StoryRef::Body);
+        let mut h = harness(a);
+        h.get_by_label("Paste Options").click();
+        for _ in 0..3 {
+            h.step();
+        }
+        h.get_by_label("Picture").click();
+        for _ in 0..3 {
+            h.step();
+        }
+        let msg = h.state().status_msg.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+        assert!(msg.contains("too long") && msg.contains("choose another option"), "the status line says why and what to do: {msg:?}");
+        assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), before, "the paste is unchanged");
+        assert!(h.query_by_label("Paste Options").is_some(), "the button stays");
+    }
+
     #[test]
     fn escape_and_typing_hide_the_button() {
         let mut h = harness(pasted());

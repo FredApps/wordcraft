@@ -400,6 +400,9 @@ pub const PASTE_OPTIONS: [(&str, &str); 4] =
 
 /// Pixels per point of the picture a paste is turned into (twice screen size, so it stays sharp).
 const PICTURE_SCALE: f32 = 2.0;
+/// Why Picture is refused for long content: it is shown to the person, so it says what to do.
+const TOO_LONG_FOR_PICTURE: &str =
+    "the pasted content is too long to turn into a picture (more than two pages tall): choose another option, or paste less";
 /// Tallest content turned into a picture, in points (the raster's side is limited).
 const PICTURE_MAX_H: f32 = 7000.0;
 
@@ -427,7 +430,7 @@ fn fragment_picture(s: &Session, frag: &Fragment) -> Result<(Vec<u8>, f32, f32),
     let page = layout.pages.first().ok_or_else(|| CmdError::Failed("nothing to turn into a picture".into()))?;
     // More than one page of it can't be drawn whole: refuse rather than leave the rest out.
     if layout.pages.len() > 1 {
-        return Err(CmdError::Failed("the pasted content is too long to turn into a picture".into()));
+        return Err(CmdError::Failed(TOO_LONG_FOR_PICTURE.into()));
     }
     // Draw only as much page as the content takes, not the whole tall one it was laid out on.
     let used = page.content_bottom();
@@ -438,7 +441,7 @@ fn fragment_picture(s: &Session, frag: &Fragment) -> Result<(Vec<u8>, f32, f32),
         layout
     };
     if layout.pages.len() > 1 {
-        return Err(CmdError::Failed("the pasted content is too long to turn into a picture".into()));
+        return Err(CmdError::Failed(TOO_LONG_FOR_PICTURE.into()));
     }
     let page = layout.pages.first().ok_or_else(|| CmdError::Failed("nothing to turn into a picture".into()))?;
     let img = wordcraft_render::render_page(&d, page, PICTURE_SCALE, &Default::default());
@@ -487,7 +490,7 @@ fn fit_to_page_height(s: &Session, width: f32, height: f32) -> Result<f32, CmdEr
         return Ok(width);
     }
     if height > page_h * 2.0 {
-        return Err(CmdError::Failed("the pasted content is too long to turn into a picture".into()));
+        return Err(CmdError::Failed(TOO_LONG_FOR_PICTURE.into()));
     }
     Ok(width * page_h / height)
 }
