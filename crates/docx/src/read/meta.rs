@@ -28,7 +28,14 @@ impl Reader<'_> {
             return false;
         }
         // Inspect the raw URI before generic relationship resolution can erase a bad traversal.
-        let Some(target) = rel.attr("Target").and_then(|t| crate::mail_merge::recipient_target(path, t)) else { return false };
+        // Match the package spelling used by resolved relationships and retained-part keys.
+        let Some(target) = rel
+            .attr("Target")
+            .and_then(|t| crate::mail_merge::recipient_target(path, t))
+            .and_then(|target| self.pkg.canonical(&target).map(str::to_owned))
+        else {
+            return false;
+        };
         if self.pkg.get(&rels_path(&target)).is_some() {
             return false; // Recipient data is a leaf, never an arbitrary dependent part graph.
         }

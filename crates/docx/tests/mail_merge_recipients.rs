@@ -202,3 +202,35 @@ fn losing_kept_recipient_bytes_refuses_the_save() {
     doc.passthrough.insert("word/recipientData.xml".into(), Arc::new(vec![b' '; 1024 * 1024 + 1]));
     assert!(wordcraft_docx::write(&doc).unwrap_err().to_string().contains("mail merge"));
 }
+
+#[test]
+fn recipient_part_spelling_follows_package_canonicalization() {
+    for (stored, target) in [
+        ("word/RecipientData.xml", "recipientData.xml"),
+        ("word/recipientData.xml", "RecipientData.xml"),
+        ("word/RECIPIENTDATA.XML", "ReCiPiEnTdAtA.xMl"),
+    ] {
+        let mut input = fixture(WORD, CT, W);
+        let payload = input.remove("word/recipientData.xml").unwrap();
+        input.insert(stored.into(), payload.clone());
+        change(&mut input, "[Content_Types].xml", "/word/recipientData.xml", &format!("/{stored}"));
+        change(&mut input, "word/_rels/settings.xml.rels", "Target=\"recipientData.xml\"", &format!("Target=\"{target}\""));
+        let mut doc = wordcraft_docx::read(&zip(&input)).unwrap();
+        doc = serde_json::from_slice(&serde_json::to_vec(&doc).unwrap()).unwrap();
+        for _ in 0..2 {
+            let saved = wordcraft_docx::write(&doc).expect("a case-insensitively resolved recipient part must stay saveable");
+            let output = unzip(&saved);
+            assert_eq!(output[stored], payload, "recipient flags and keys must stay byte-identical");
+            let refs = elements(&output["word/settings.xml"], b"w:recipientData");
+            assert_eq!(refs.len(), 1);
+            let rels = elements(&output["word/_rels/settings.xml.rels"], b"Relationship");
+            let rel = rels.iter().find(|r| r["Id"] == refs[0]["r:id"]).unwrap();
+            assert_eq!(format!("word/{}", rel["Target"]), stored);
+            assert!(
+                elements(&output["[Content_Types].xml"], b"Override").iter().any(|c| c["PartName"] == format!("/{stored}") && c["ContentType"] == CT)
+            );
+            assert!(String::from_utf8(output["word/settings.xml"].clone()).unwrap().contains("SELECT Name FROM Letters"));
+            doc = wordcraft_docx::read(&saved).unwrap();
+        }
+    }
+}
