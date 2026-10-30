@@ -1,8 +1,7 @@
 # WordCraft roadmap
 
 > **Mail-merge maintenance:** 2026-10-27 · External source preservation and namespace-alias handling follow the current DOCX modules. Internal sources remain separate in #2443; readiness estimates unchanged.
-
-
+>
 > **Highlight update:** 2026-10-25 · Highlight shortcut toggles the last chosen colour off when the whole selection has it; explicit colour commands remain setters (#4085). Readiness estimates unchanged.
 
 **Stage: alpha** · next: beta, ~15 points (60% → 75% ready for real work) and ~150–230 h away
