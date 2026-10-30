@@ -128,6 +128,31 @@ fn background_colour_functions_and_shorthands_become_character_shading() {
     }
 }
 
+/// A browser writes `rgba(0, 0, 0, 0)` for a run with no background: that is no shading, not
+/// black. A partly transparent colour is kept as the opaque colour.
+#[test]
+fn transparent_backgrounds_are_no_shading() {
+    let shade = |css: &str| {
+        let f = parse(&format!("<p><span style=\"{css}\">t</span></p>"));
+        let FBlock::Para(p) = &f.blocks[0] else { panic!() };
+        p.inlines.iter().find_map(|i| if let Inline::Text(_, f) = i { Some(f.background) } else { None }).unwrap()
+    };
+    for css in [
+        "background-color: rgba(0, 0, 0, 0)",
+        "background-color:rgba(0,0,0,0.0)",
+        "background-color: hsla(0, 0%, 0%, 0)",
+        "background-color: rgb(0 0 0 / 0%)",
+        "background-color: #00000000",
+        "background-color: #0000",
+        "background: rgba(0, 0, 0, 0) none repeat scroll 0% 0%",
+        "background: url(x.png) rgba(255, 0, 0, 0)",
+    ] {
+        assert_eq!(shade(css), None, "{css}");
+    }
+    assert_eq!(shade("background-color: rgba(255, 255, 0, 0.5)"), Some(wordcraft_doc::Rgb(255, 255, 0)), "partial alpha keeps the colour");
+    assert_eq!(shade("background-color: rgba(255, 255, 0, 1)"), Some(wordcraft_doc::Rgb(255, 255, 0)));
+}
+
 /// A line-height may have spaces around its slash, any weight 1–1000 is a weight, and a
 /// shorthand without a family is invalid and changes nothing.
 #[test]

@@ -251,13 +251,29 @@ pub fn rich_fragment(s: &mut Session, v: &Value) -> Option<Fragment> {
     let fits = |k: &str| p::str(v, k).filter(|t| !t.trim().is_empty() && t.len() <= MAX_PASTE_BYTES);
     let doc = fits("html").map(import_html);
     let doc = match doc.filter(has_content) {
-        Some(d) => d,
+        Some(mut d) => {
+            drop_computed_left(&mut d);
+            d
+        }
         None => {
             let rtf = fits("rtf").filter(|t| looks_like_rtf(t))?;
             wordcraft_formats::rtf::import(rtf.as_bytes()).ok().filter(has_content)?
         }
     };
     Some(adopt(s, doc))
+}
+
+/// Browsers write the computed `text-align: left` (or `start`) on every paragraph they copy: that
+/// is the default, not a choice, so it must not override a centered destination for all but the
+/// first paragraph. Only HTML is treated so: in RTF `\ql` is a property the author set.
+fn drop_computed_left(doc: &mut Document) {
+    for b in &mut doc.body {
+        each_para(Arc::make_mut(b), 0, &mut |p| {
+            if p.props.align == Some(wordcraft_doc::Align::Left) {
+                p.props.align = None;
+            }
+        });
+    }
 }
 
 /// What a Paste brings in.
@@ -278,17 +294,7 @@ pub fn paste_content(s: &mut Session, v: &Value) -> Result<Pasted, CmdError> {
     {
         return Ok(Pasted::Fragment(f.clone()));
     }
-    if let Some(mut f) = rich_fragment(s, v) {
-        // Browsers write the computed `text-align: left` (or `start`) on every paragraph they
-        // copy: that is the default, not a choice, so it must not override a centered
-        // destination for all but the first paragraph.
-        for b in &mut f.blocks {
-            each_para(b, 0, &mut |p| {
-                if p.props.align == Some(wordcraft_doc::Align::Left) {
-                    p.props.align = None;
-                }
-            });
-        }
+    if let Some(f) = rich_fragment(s, v) {
         return Ok(Pasted::Fragment(f));
     }
     match text {
@@ -933,6 +939,39 @@ mod tests {
         s.run("edit.pasteChange", &json!({"mode": "source"})).unwrap();
         let first = s.doc.para_at(&s.doc.start_of(wordcraft_doc::StoryRef::Body)).unwrap();
         assert!(first.runs.iter().any(|r| r.props.bold == Some(true)), "the source's bold is back: {:?}", first.runs);
+    }
+
+    /// `\ql` in pasted RTF is a left alignment the author chose: it is kept in a centered
+    /// destination. Only a browser's computed `text-align: left` is dropped.
+    #[test]
+    fn rtf_left_alignment_is_kept_in_a_centered_destination() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("para.alignCenter", &json!({})).unwrap();
+        let rtf = "{\\rtf1\\ansi\\pard\\ql First\\par\\pard\\ql Second\\par}";
+        s.run("edit.paste", &json!({"text": "First\nSecond", "rtf": rtf})).unwrap();
+        let aligns: Vec<_> = s.doc.body.iter().filter_map(|b| if let Block::Para(p) = &**b { Some(p.props.align) } else { None }).collect();
+        // The first paragraph joins the destination's; the second keeps the \ql the source set.
+        assert_eq!(aligns.last(), Some(&Some(wordcraft_doc::Align::Left)), "{aligns:?}");
+        // The same text from a browser (computed left) takes the destination's alignment.
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("para.alignCenter", &json!({})).unwrap();
+        let html = "<p style=\"text-align:left\">First</p><p style=\"text-align:left\">Second</p>";
+        s.run("edit.paste", &json!({"text": "First\nSecond", "html": html})).unwrap();
+        let aligns: Vec<_> = s.doc.body.iter().filter_map(|b| if let Block::Para(p) = &**b { Some(p.props.align) } else { None }).collect();
+        assert!(aligns.iter().all(|a| *a == Some(wordcraft_doc::Align::Center)), "{aligns:?}");
+    }
+
+    /// The copy of the pasted content that Paste Options keeps is freed when the offer ends: the
+    /// next edit drops it, but moving the caret away does not (the offer comes back at the end).
+    #[test]
+    fn the_pasted_copy_is_freed_when_the_offer_ends() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        let html = "<p><b>Hello</b> world</p><p>Second</p>";
+        s.run("edit.paste", &json!({"text": "Hello world\nSecond", "html": html})).unwrap();
+        assert!(s.last_paste.is_some() && !paste_options(&s).is_empty());
+        s.run("text.insert", &json!({"text": "x"})).unwrap();
+        assert!(s.last_paste.is_none(), "typing ends the offer and frees the copy");
+        assert!(paste_options(&s).is_empty());
     }
 
     /// Picture at the start of a document puts the paragraph the paste restyled back.
