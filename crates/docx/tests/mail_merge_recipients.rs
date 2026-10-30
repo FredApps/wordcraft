@@ -135,6 +135,17 @@ fn structurally_malformed_recipient_xml_refuses_docx_and_native_saves() {
             format!("{valid}<extra/>"),
             format!("{valid}<extra>"),
             valid.replace("</v:recipients>", "&undefined;</v:recipients>"),
+            format!("{valid}garbage"),
+            format!("garbage{valid}"),
+            valid.replacen("v:val=\"0\"", "v:val=\"0\" v:val=\"1\"", 1),
+            valid.replacen("v:val=\"0\"", "v:val=\"&undefined;\"", 1),
+            valid.replacen("v:val=\"0\"", "v:val=\"a&b\"", 1),
+            valid.replacen("v:val=\"0\"", "v:val=0", 1),
+            format!("{valid}<![CDATA[outside]]>"),
+            format!("{valid}&amp;"),
+            format!("{valid}<!-- bad--comment -->"),
+            format!("{valid}<?xml version=\"1.0\"?>"),
+            valid.replace("</v:recipients>", "<?xml version=\"1.0\"?></v:recipients>"),
         ];
         for payload in malformed {
             let mut input = original.clone();

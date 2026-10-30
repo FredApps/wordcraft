@@ -311,22 +311,32 @@ pub fn parse(bytes: &[u8]) -> Result<El, DocxError> {
 /// [`parse`] with `extra` namespaces (prefix, URI) mapped to canonical prefixes first, so a
 /// related vocabulary (WordprocessingML 2003) reads with the prefixes the reader knows.
 pub fn parse_ns(bytes: &[u8], extra: &[(&'static str, &str)]) -> Result<El, DocxError> {
-    parse_with(bytes, extra, false)
+    parse_with(bytes, extra, ParseMode::Lenient)
 }
 
 /// [`parse_ns`] with the structural checks of [`parse_strict`]: one root, matching end tags
-/// and no unclosed element at the end of the byte stream.
+/// and no unclosed element at the end of the byte stream. Opaque retained parts also require
+/// valid attributes and only whitespace, comments and processing instructions around the root.
 pub fn parse_ns_strict(bytes: &[u8], extra: &[(&'static str, &str)]) -> Result<El, DocxError> {
-    parse_with(bytes, extra, true)
+    parse_with(bytes, extra, ParseMode::Retained)
 }
 
 /// [`parse`] for a part whose loss would be silent data loss (the main document): a mismatched end
 /// tag or an element left open at the end of the data is an error, not a cue to stop reading.
 pub fn parse_strict(bytes: &[u8]) -> Result<El, DocxError> {
-    parse_with(bytes, &[], true)
+    parse_with(bytes, &[], ParseMode::Strict)
 }
 
-fn parse_with(bytes: &[u8], extra: &[(&'static str, &str)], strict: bool) -> Result<El, DocxError> {
+#[derive(Clone, Copy)]
+enum ParseMode {
+    Lenient,
+    Strict,
+    Retained,
+}
+
+fn parse_with(bytes: &[u8], extra: &[(&'static str, &str)], mode: ParseMode) -> Result<El, DocxError> {
+    let strict = !matches!(mode, ParseMode::Lenient);
+    let retained = matches!(mode, ParseMode::Retained);
     // UTF-16 (with a BOM) is transcoded to UTF-8; a UTF-8 BOM is stripped.
     let transcoded = utf16_to_utf8(bytes);
     let bytes = match &transcoded {
@@ -340,14 +350,22 @@ fn parse_with(bytes: &[u8], extra: &[(&'static str, &str)], strict: bool) -> Res
         c.trim_text_end = false;
         c.expand_empty_elements = false;
         c.check_end_names = strict;
+        c.check_comments = retained;
     }
     let mut stack: Vec<El> = Vec::new();
     let mut root: Option<El> = None;
     let mut count = 0usize;
+    let mut declaration_allowed = true;
     let mut buf = Vec::new();
     loop {
         buf.clear();
         let (res, ev) = r.read_resolved_event_into(&mut buf).map_err(|e| DocxError::Xml(e.to_string()))?;
+        if retained {
+            if matches!(ev, Event::Decl(_)) && !declaration_allowed {
+                return Err(DocxError::Xml("an XML declaration is misplaced".into()));
+            }
+            declaration_allowed = false;
+        }
         let el_prefix = match &res {
             ResolveResult::Bound(ns) => Some(prefix_for(ns.as_ref(), extra)),
             _ => None,
@@ -367,14 +385,21 @@ fn parse_with(bytes: &[u8], extra: &[(&'static str, &str)], strict: bool) -> Res
                     None => local,
                 };
                 let mut el = El { name, attrs: Vec::new(), kids: Vec::new() };
-                for a in e.attributes().with_checks(false) {
+                for a in e.attributes().with_checks(retained) {
                     if el.attrs.len() >= MAX_ATTRS {
                         return Err(DocxError::Limit("too many attributes on one element".into()));
                     }
-                    let Ok(a) = a else { continue };
+                    let a = match a {
+                        Ok(a) => a,
+                        Err(e) if retained => return Err(DocxError::Xml(e.to_string())),
+                        Err(_) => continue,
+                    };
                     let key = a.key;
                     let raw_key = key.as_ref();
                     if raw_key == b"xmlns" || raw_key.starts_with(b"xmlns:") {
+                        if retained {
+                            a.normalized_value(XmlVersion::Explicit1_0).map_err(|e| DocxError::Xml(e.to_string()))?;
+                        }
                         continue;
                     }
                     let (ares, alocal) = r.resolver_mut().resolve_attribute(key);
@@ -385,6 +410,7 @@ fn parse_with(bytes: &[u8], extra: &[(&'static str, &str)], strict: bool) -> Res
                     };
                     let val = match a.normalized_value(XmlVersion::Explicit1_0) {
                         Ok(v) => v.into_owned(),
+                        Err(e) if retained => return Err(DocxError::Xml(e.to_string())),
                         Err(_) => String::from_utf8_lossy(&a.value).into_owned(),
                     };
                     // Requires contains namespace prefixes, not feature names. Resolve them while
@@ -426,18 +452,27 @@ fn parse_with(bytes: &[u8], extra: &[(&'static str, &str)], strict: bool) -> Res
                 }
             }
             Event::Text(t) => {
+                if retained && stack.is_empty() && !t.iter().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')) {
+                    return Err(DocxError::Xml("text outside the root element".into()));
+                }
                 if let Some(top) = stack.last_mut() {
                     let s = t.decode().map_err(|e| DocxError::Xml(e.to_string()))?;
                     push_text(top, &s);
                 }
             }
             Event::CData(t) => {
+                if retained && stack.is_empty() {
+                    return Err(DocxError::Xml("CDATA outside the root element".into()));
+                }
                 if let Some(top) = stack.last_mut() {
                     let s = String::from_utf8_lossy(&t).into_owned();
                     push_text(top, &s);
                 }
             }
             Event::GeneralRef(g) => {
+                if retained && stack.is_empty() {
+                    return Err(DocxError::Xml("an entity outside the root element".into()));
+                }
                 if let Some(top) = stack.last_mut() {
                     let ch = match g.resolve_char_ref() {
                         Ok(Some(c)) => Some(c.to_string()),
