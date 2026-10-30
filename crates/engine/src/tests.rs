@@ -8467,6 +8467,8 @@ fn dictionaries_folder_option_is_saved_searched_and_reported() {
         // would otherwise force a reload that finds no cs_CZ here and empties it mid-test. Same
         // fixture content either way keeps such a race harmless, as it already does for Polish.
         ("cs_CZ", czech_test_dict::AFF, czech_test_dict::DIC),
+        // French Review installs this same fixture; a concurrent folder reload must retain it.
+        ("fr_FR", FRENCH_TEST_AFF, FRENCH_TEST_DIC),
     ] {
         std::fs::write(dir.join(format!("{name}.aff")), aff).unwrap();
         std::fs::write(dir.join(format!("{name}.dic")), dic).unwrap();
@@ -8485,6 +8487,13 @@ fn dictionaries_folder_option_is_saved_searched_and_reported() {
     assert_eq!(file("pl"), Some(json!(dir.join("pl_PL.dic").to_string_lossy())));
     assert_eq!(file("pt"), Some(json!(dir.join("pt_BR.dic").to_string_lossy())));
     assert_eq!(file("id"), Some(json!(dir.join("id_ID.dic").to_string_lossy())));
+    assert_eq!(file("fr"), Some(json!(dir.join("fr_FR.dic").to_string_lossy())));
+    // The reload keeps the same French words, affixes and typo correction as explicit install.
+    for word in ["école", "écoles", "chat", "chats"] {
+        assert!(wordcraft_proof::fr::is_correct(word), "{word}");
+    }
+    assert!(!wordcraft_proof::fr::is_correct("chaat"));
+    assert!(wordcraft_proof::fr::suggest("chaat", 6).iter().any(|word| word == "chat"));
     // Each Spanish variety reports its own file (Spain, Mexico, Latin America, Uruguay, in order).
     let spanish: Vec<serde_json::Value> = dicts.iter().filter(|d| d["language"] == "es").map(|d| d["file"].clone()).collect();
     assert_eq!(spanish.len(), 4);
@@ -8877,10 +8886,12 @@ fn italian_proofing_through_the_review_commands() {
     assert_eq!(left.as_array().unwrap().len(), 1, "{left}");
 }
 
+const FRENCH_TEST_AFF: &str =
+    "SET UTF-8\nFLAG long\nTRY esaitnrulodcpmévqfbghjàxèê\nMAP 2\nMAP eéèê\nMAP aàâ\nSFX S. Y 2\nSFX S. 0 0 .\nSFX S. 0 s .\n";
+const FRENCH_TEST_DIC: &str = "7\nécole/S.\nmaison/S.\nle/S.\nchat/S.\ndort\net\nla\n";
+
 fn french_test_dictionary() {
-    let aff = "SET UTF-8\nFLAG long\nTRY esaitnrulodcpmévqfbghjàxèê\nMAP 2\nMAP eéèê\nMAP aàâ\nSFX S. Y 2\nSFX S. 0 0 .\nSFX S. 0 s .\n";
-    let dic = "7\nécole/S.\nmaison/S.\nle/S.\nchat/S.\ndort\net\nla\n";
-    wordcraft_proof::fr::install_dictionary(aff, dic).unwrap();
+    wordcraft_proof::fr::install_dictionary(FRENCH_TEST_AFF, FRENCH_TEST_DIC).unwrap();
 }
 
 /// Review › Language and the proofing commands work in French end to end: the language makes
