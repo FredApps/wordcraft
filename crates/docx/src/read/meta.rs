@@ -32,6 +32,7 @@ impl Reader<'_> {
         let Some(target) = rel
             .attr("Target")
             .and_then(|t| crate::mail_merge::recipient_target(path, t))
+            .filter(|target| !self.pkg.has_ambiguous_spelling(target))
             .and_then(|target| self.pkg.canonical(&target).map(str::to_owned))
         else {
             return false;

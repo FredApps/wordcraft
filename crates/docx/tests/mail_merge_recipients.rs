@@ -234,3 +234,49 @@ fn recipient_part_spelling_follows_package_canonicalization() {
         }
     }
 }
+
+#[test]
+fn recipient_case_collisions_refuse_only_when_both_spellings_are_referenced() {
+    for recipient in ["recipientData.xml", "RecipientData.xml"] {
+        for other_owner in ["document", "settings"] {
+            for both_referenced in [false, true] {
+                let mut input = fixture(WORD, CT, W);
+                let lower = input["word/recipientData.xml"].clone();
+                let upper = String::from_utf8(lower.clone()).unwrap().replace("ZXhjbHVkZWQ=", "b3RoZXIta2V5").into_bytes();
+                assert_ne!(lower, upper);
+                input.insert("word/RecipientData.xml".into(), upper.clone());
+                change(
+                    &mut input,
+                    "[Content_Types].xml",
+                    "</Types>",
+                    &format!(r#"<Override PartName="/word/RecipientData.xml" ContentType="{CT}"/></Types>"#),
+                );
+                change(&mut input, "word/_rels/settings.xml.rels", "Target=\"recipientData.xml\"", &format!("Target=\"{recipient}\""));
+                if both_referenced {
+                    let other = if recipient == "recipientData.xml" { "RecipientData.xml" } else { "recipientData.xml" };
+                    change(
+                        &mut input,
+                        &format!("word/_rels/{other_owner}.xml.rels"),
+                        "</Relationships>",
+                        &format!(r#"<Relationship Id="unused" Type="https://synthetic.invalid/unused" Target="{other}"/></Relationships>"#),
+                    );
+                }
+                let mut doc = wordcraft_docx::read(&zip(&input)).unwrap();
+                doc = serde_json::from_slice(&serde_json::to_vec(&doc).unwrap()).unwrap();
+                for _ in 0..2 {
+                    if both_referenced {
+                        let err = wordcraft_docx::write(&doc).expect_err("two relationship-named spellings are ambiguous");
+                        assert!(err.to_string().contains("mail merge"), "{err}");
+                        break;
+                    }
+                    let saved = wordcraft_docx::write(&doc).expect("only the recipient's spelling is referenced");
+                    let output = unzip(&saved);
+                    let stored = format!("word/{recipient}");
+                    assert_eq!(output[&stored], if recipient == "recipientData.xml" { &lower } else { &upper }.clone());
+                    assert!(!output.contains_key(if recipient == "recipientData.xml" { "word/RecipientData.xml" } else { "word/recipientData.xml" }));
+                    doc = wordcraft_docx::read(&saved).unwrap();
+                }
+            }
+        }
+    }
+}
