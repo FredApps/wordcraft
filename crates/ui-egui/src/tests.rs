@@ -7292,11 +7292,7 @@ fn format_painter_double_click_drag_and_copy_paste_preserve_target_scope() {
         let para = h.state().session.doc.para_at(&target_start).unwrap();
         for off in target_start.off..target_end.off {
             let got = para.props_of_char(off);
-            assert_eq!(
-                (&got.bold, &got.italic, &got.underline),
-                (&source.bold, &source.italic, &source.underline),
-                "{gesture}: target offset {off}"
-            );
+            assert_eq!((&got.bold, &got.italic, &got.underline), (&source.bold, &source.italic, &source.underline), "{gesture}: target offset {off}");
         }
         assert_ne!(para.props_of_char(target_end.off).bold, source.bold, "{gesture}: trailing space stays plain");
         assert_ne!(para.props_of_char(text.len() - 2).bold, source.bold, "{gesture}: surrounding text stays plain");
