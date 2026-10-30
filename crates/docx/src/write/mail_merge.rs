@@ -55,9 +55,16 @@ pub(crate) fn keep_rels(rels: &Rels) -> Result<Vec<u8>, DocxError> {
 /// Rebind only mail-merge external sources to newly allocated IDs. Missing, ambiguous, internal
 /// or unsupported references refuse the save rather than silently turning a template into a letter.
 pub(super) fn write(doc: &Document, out: &mut PartRels) -> Result<Option<String>, DocxError> {
-    let Some(orig) = doc.passthrough.get(SETTINGS_ORIG) else { return Ok(None) };
+    let missing_settings = || {
+        if doc.passthrough.contains_key(MAIL_MERGE_RELS) {
+            Err(DocxError::MailMerge("retained mail merge settings are missing".into()))
+        } else {
+            Ok(None)
+        }
+    };
+    let Some(orig) = doc.passthrough.get(SETTINGS_ORIG) else { return missing_settings() };
     let settings = xml::parse(orig)?;
-    let Some(original) = settings.child("w:mailMerge") else { return Ok(None) };
+    let Some(original) = settings.child("w:mailMerge") else { return missing_settings() };
     if settings.children("w:mailMerge").count() != 1 {
         return Err(DocxError::MailMerge("multiple mailMerge elements".into()));
     }
@@ -118,6 +125,40 @@ pub(super) fn write(doc: &Document, out: &mut PartRels) -> Result<Option<String>
     merge.attrs.push(("xmlns:w".into(), "http://schemas.openxmlformats.org/wordprocessingml/2006/main".into()));
     merge.attrs.push(("xmlns:r".into(), "http://schemas.openxmlformats.org/officeDocument/2006/relationships".into()));
     Ok(Some(merge.to_xml()))
+}
+
+/// Match source relationship types to the settings vocabulary actually emitted after merging.
+pub(super) fn source_relationships(settings: &[u8], rels: PartRels) -> Result<PartRels, DocxError> {
+    const TRANSITIONAL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+    let mut reader = quick_xml::NsReader::from_reader(settings);
+    let namespace = loop {
+        let (namespace, event) = reader.read_resolved_event().map_err(|e| DocxError::Xml(e.to_string()))?;
+        match event {
+            quick_xml::events::Event::Start(_) => {
+                break match namespace {
+                    quick_xml::name::ResolveResult::Bound(ns) if ns.as_ref() == b"http://purl.oclc.org/ooxml/wordprocessingml/main" => STRICT,
+                    quick_xml::name::ResolveResult::Bound(ns) if ns.as_ref() == b"http://schemas.openxmlformats.org/wordprocessingml/2006/main" => {
+                        TRANSITIONAL
+                    }
+                    _ => return Err(DocxError::MailMerge("unsupported settings namespace".into())),
+                };
+            }
+            quick_xml::events::Event::Eof => return Err(DocxError::MailMerge("missing settings root".into())),
+            _ => {}
+        }
+    };
+    let mut out = PartRels::default();
+    for (id, kind, target, external) in rels.list {
+        let kind = match kind.rsplit_once('/') {
+            Some((prefix, suffix)) if [TRANSITIONAL, STRICT].contains(&prefix) && matches!(suffix, "mailMergeSource" | "mailMergeHeaderSource") => {
+                format!("{namespace}/{suffix}")
+            }
+            _ => kind,
+        };
+        out.add_with_id(&id, &kind, &target, external);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

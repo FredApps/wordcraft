@@ -120,6 +120,31 @@ fn assert_sources(bytes: &[u8]) {
 }
 
 #[test]
+fn orphaned_native_mail_merge_bookkeeping_refuses_the_save() {
+    const ORIGINAL: &str = "wordcraft:settings.orig";
+    const RELATIONSHIPS: &str = "wordcraft:settings.mailMerge.rels";
+    let source = fixture(&merge(), &source_rels());
+    let imported = wordcraft_docx::read(&source).unwrap();
+    assert!(imported.passthrough.contains_key(RELATIONSHIPS));
+    for original in [None, Some(format!(r#"<w:settings xmlns:w="{W}"><w:doNotAutoCompressPictures/></w:settings>"#))] {
+        let mut doc = imported.clone();
+        if let Some(xml) = original {
+            doc.passthrough.insert(ORIGINAL.into(), std::sync::Arc::new(xml.into_bytes()));
+        } else {
+            doc.passthrough.remove(ORIGINAL);
+        }
+        let error = wordcraft_docx::write(&doc).expect_err("orphaned native mail-merge state must refuse saving");
+        assert!(error.to_string().contains("mail merge"), "{error}");
+        // Without retained mail-merge bookkeeping, ordinary settings remain saveable.
+        let mut cleared = doc;
+        cleared.passthrough.remove(RELATIONSHIPS);
+        let saved = wordcraft_docx::write(&cleared).unwrap();
+        assert!(elements(&part(&saved, "word/settings.xml"), "w:mailMerge").is_empty());
+    }
+    assert_sources(&wordcraft_docx::write(&imported).unwrap());
+}
+
+#[test]
 fn mail_merge_sources_survive_edit_and_two_docx_saves() {
     let original = fixture(&merge(), &source_rels());
     assert_sources(&original);
@@ -345,10 +370,27 @@ fn strict_mail_merge_settings_keep_consistent_namespaces_through_two_saves() {
             let rels = elements(&part(&saved, "word/_rels/settings.xml.rels"), "Relationship");
             for id in references {
                 let rel = rels.iter().find(|r| r["Id"] == id).unwrap();
-                assert!(rel["Type"].starts_with(SR) || rel["Type"] == format!("{R}/attachedTemplate"));
+                assert!(rel["Type"].starts_with(expected_r) || rel["Type"] == format!("{R}/attachedTemplate"));
                 assert_eq!(rel["TargetMode"], "External");
             }
             doc = wordcraft_docx::read(&saved).unwrap();
+        }
+    }
+}
+
+#[test]
+fn foreign_mail_merge_spelling_is_preserved_with_and_without_a_real_merge() {
+    let foreign = r#"<w:mailMerge xmlns:w="urn:original:unrelated"><w:opaque w:value="Retain extension."/></w:mailMerge>"#;
+    for real in ["".to_string(), merge()] {
+        for settings in [format!("{foreign}{real}"), format!("{real}{foreign}")] {
+            let mut doc = wordcraft_docx::read(&fixture(&settings, &source_rels())).unwrap();
+            for _ in 0..2 {
+                let saved = wordcraft_docx::write(&doc).unwrap();
+                let settings = part(&saved, "word/settings.xml");
+                assert!(settings.contains(foreign), "foreign extension lost: {settings}");
+                assert_eq!(settings.matches("<w:query ").count(), usize::from(!real.is_empty()));
+                doc = wordcraft_docx::read(&saved).unwrap();
+            }
         }
     }
 }
