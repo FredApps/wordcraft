@@ -314,6 +314,12 @@ pub fn parse_ns(bytes: &[u8], extra: &[(&'static str, &str)]) -> Result<El, Docx
     parse_with(bytes, extra, false)
 }
 
+/// [`parse_ns`] with the structural checks of [`parse_strict`]: one root, matching end tags
+/// and no unclosed element at the end of the byte stream.
+pub fn parse_ns_strict(bytes: &[u8], extra: &[(&'static str, &str)]) -> Result<El, DocxError> {
+    parse_with(bytes, extra, true)
+}
+
 /// [`parse`] for a part whose loss would be silent data loss (the main document): a mismatched end
 /// tag or an element left open at the end of the data is an error, not a cue to stop reading.
 pub fn parse_strict(bytes: &[u8]) -> Result<El, DocxError> {

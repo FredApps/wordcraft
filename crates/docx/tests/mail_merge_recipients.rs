@@ -123,6 +123,39 @@ fn embedded_recipient_choices_survive_edit_two_saves_and_native_json() {
 }
 
 #[test]
+fn structurally_malformed_recipient_xml_refuses_docx_and_native_saves() {
+    for (kind, ct, ns) in [(WORD, CT, W), (WORD, MS_CT, WNE), (ISO, CT, W)] {
+        let original = fixture(kind, ct, ns);
+        let valid = String::from_utf8(original["word/recipientData.xml"].clone()).unwrap();
+        let malformed = [
+            valid.replace("</v:recipients>", ""),
+            valid.replace("</v:recipientData>", ""),
+            valid.replace("</v:recipients>", "</v:other>"),
+            valid.replace("</v:recipientData>", "</v:other>"),
+            format!("{valid}<extra/>"),
+            format!("{valid}<extra>"),
+            valid.replace("</v:recipients>", "&undefined;</v:recipients>"),
+        ];
+        for payload in malformed {
+            let mut input = original.clone();
+            input.insert("word/recipientData.xml".into(), payload.as_bytes().to_vec());
+            let imported = wordcraft_docx::read(&zip(&input)).unwrap();
+            assert!(wordcraft_docx::write(&imported).expect_err(&payload).to_string().contains("mail merge"));
+            let mut native = wordcraft_docx::read(&zip(&original)).unwrap();
+            native.passthrough.insert("word/recipientData.xml".into(), Arc::new(payload.into_bytes()));
+            native = serde_json::from_slice(&serde_json::to_vec(&native).unwrap()).unwrap();
+            assert!(wordcraft_docx::write(&native).unwrap_err().to_string().contains("mail merge"));
+        }
+        // Legal surrounding markup and whitespace stay byte-identical, not regenerated.
+        let decorated = format!("<?xml version=\"1.0\"?>\n<!-- original -->{valid}\n<?preserve original?>").into_bytes();
+        let mut input = original;
+        input.insert("word/recipientData.xml".into(), decorated.clone());
+        let output = unzip(&wordcraft_docx::write(&wordcraft_docx::read(&zip(&input)).unwrap()).unwrap());
+        assert_eq!(output["word/recipientData.xml"], decorated);
+    }
+}
+
+#[test]
 fn unsupported_recipient_inputs_refuse_instead_of_dropping_choices() {
     let original = fixture(WORD, CT, W);
     let relpart = "word/_rels/settings.xml.rels";

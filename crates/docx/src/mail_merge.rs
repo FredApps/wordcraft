@@ -43,7 +43,7 @@ pub(crate) fn validate_recipient(bytes: &[u8], content_type: &str) -> Result<(),
     if bytes.len() > MAX_EMBEDDED_XML {
         return Err(DocxError::MailMerge("recipient data exceeds 1 MiB".into()));
     }
-    let root = xml::parse_ns(bytes, &[("wne", "http://schemas.microsoft.com/office/word/2006/wordml")])
+    let root = xml::parse_ns_strict(bytes, &[("wne", "http://schemas.microsoft.com/office/word/2006/wordml")])
         .map_err(|e| DocxError::MailMerge(format!("invalid recipient data: {e}")))?;
     let valid = match content_type {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.mailMergeRecipientData+xml" => root.name == "w:recipients",
