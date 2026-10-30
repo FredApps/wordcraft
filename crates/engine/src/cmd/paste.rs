@@ -403,9 +403,10 @@ const PICTURE_SCALE: f32 = 2.0;
 /// Tallest content turned into a picture, in points (the raster's side is limited).
 const PICTURE_MAX_H: f32 = 7000.0;
 
-/// The pasted content drawn as a PNG, cropped to what is on it, with its size in points. The
-/// destination's styles and media render it, so pictures and styled text look as they did.
-fn fragment_picture(s: &Session, frag: &Fragment) -> Result<(Vec<u8>, f32), CmdError> {
+/// The pasted content drawn as a PNG, cropped to what is on it, with its size (width, height) in
+/// points. The destination's styles and media render it, so pictures and styled text look as they
+/// did.
+fn fragment_picture(s: &Session, frag: &Fragment) -> Result<(Vec<u8>, f32, f32), CmdError> {
     let mut d = s.doc.clone();
     d.body = frag.blocks.iter().cloned().map(Arc::new).collect();
     d.last_section.landscape = false;
@@ -474,7 +475,21 @@ fn fragment_picture(s: &Session, frag: &Fragment) -> Result<(Vec<u8>, f32), CmdE
     if png.is_empty() {
         return Err(CmdError::Failed("the picture could not be encoded".into()));
     }
-    Ok((png, w as f32 / PICTURE_SCALE))
+    Ok((png, w as f32 / PICTURE_SCALE, h as f32 / PICTURE_SCALE))
+}
+
+/// The widest the picture may be so that it also fits the page's text area in height: its width
+/// when it already does, else scaled down in proportion. Content more than twice a page tall would
+/// shrink to nothing legible, so it is refused instead.
+fn fit_to_page_height(s: &Session, width: f32, height: f32) -> Result<f32, CmdError> {
+    let page_h = s.doc.sections().first().map(|(_, sp)| sp.text_height()).filter(|h| h.is_finite() && *h > 10.0).unwrap_or(648.0);
+    if height <= page_h {
+        return Ok(width);
+    }
+    if height > page_h * 2.0 {
+        return Err(CmdError::Failed("the pasted content is too long to turn into a picture".into()));
+    }
+    Ok(width * page_h / height)
 }
 
 /// The fragment's words as plain paragraphs, the way Keep Text Only pastes them: a table row is
@@ -538,7 +553,8 @@ pub fn change_paste(s: &mut Session, v: &Value) -> CmdResult {
     }
     let Some(lp) = s.last_paste.clone() else { return Err(CmdError::Disabled("there is no paste to change".into())) };
     if mode == "picture" {
-        let (png, width) = fragment_picture(s, &lp.source)?;
+        let (png, width, height) = fragment_picture(s, &lp.source)?;
+        let width = fit_to_page_height(s, width, height)?;
         super::controls::prepare_edit(s)?;
         s.sel = Selection { anchor: lp.start.clone(), focus: lp.end.clone() };
         let at = delete_selection(s)?;
@@ -854,7 +870,7 @@ mod tests {
         let html = "<table border=\"1\"><tr><th>Item</th><th>Qty</th></tr><tr><td>Pencil</td><td>12</td></tr></table>";
         s.run("edit.paste", &json!({"text": "Item\tQty\nPencil\t12", "html": html})).unwrap();
         let source = s.last_paste.as_ref().map(|lp| lp.source.clone()).unwrap();
-        let (png, width_pt) = fragment_picture(&s, &source).unwrap();
+        let (png, width_pt, _) = fragment_picture(&s, &source).unwrap();
         let (w, h) = wordcraft_render::image_size(&png).unwrap();
         assert!(h < 400, "{w}×{h}px: cropped to the table, not the page");
         assert!(width_pt > 20.0 && width_pt < 500.0, "{width_pt}pt");
@@ -972,6 +988,41 @@ mod tests {
         s.run("text.insert", &json!({"text": "x"})).unwrap();
         assert!(s.last_paste.is_none(), "typing ends the offer and frees the copy");
         assert!(paste_options(&s).is_empty());
+    }
+
+    /// A picture taller than the page's text area is scaled to fit it, not left running off the
+    /// page; content more than two pages tall is refused.
+    #[test]
+    fn a_tall_picture_fits_the_page() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        let text_h = s.doc.sections().first().map(|(_, sp)| sp.text_height()).unwrap();
+        let html: String = (0..45).map(|i| format!("<p><b>line {i}</b></p>")).collect();
+        let text: String = (0..45).map(|i| format!("line {i}\n")).collect();
+        s.run("edit.paste", &json!({"text": text, "html": html})).unwrap();
+        let source = s.last_paste.as_ref().map(|lp| lp.source.clone()).unwrap();
+        let (_, _, height) = fragment_picture(&s, &source).unwrap();
+        assert!(height > text_h, "the test content is taller than the page: {height} vs {text_h}");
+        s.run("edit.pasteChange", &json!({"mode": "picture"})).unwrap();
+        let mut found = None;
+        for b in &s.doc.body {
+            if let Block::Para(p) = &**b {
+                for o in &p.objects {
+                    if let wordcraft_doc::InlineObject::Image { h, .. } = o {
+                        found = Some(*h);
+                    }
+                }
+            }
+        }
+        let h = found.expect("a picture was inserted");
+        assert!(h <= text_h + 0.5, "the picture ({h} pt) fits the page's text height ({text_h} pt)");
+        // Several pages of it would shrink to nothing legible: refused, and the paste stays.
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        let html: String = (0..200).map(|i| format!("<p><b>line {i}</b></p>")).collect();
+        let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        s.run("edit.paste", &json!({"text": text, "html": html})).unwrap();
+        let err = s.run("edit.pasteChange", &json!({"mode": "picture"})).unwrap_err();
+        assert!(err.to_string().contains("too long"), "{err}");
+        assert!(!paste_options(&s).is_empty(), "the paste is unchanged and still offers its options");
     }
 
     /// Picture at the start of a document puts the paragraph the paste restyled back.
