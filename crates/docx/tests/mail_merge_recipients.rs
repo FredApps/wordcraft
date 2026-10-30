@@ -96,8 +96,12 @@ fn embedded_recipient_choices_survive_edit_two_saves_and_native_json() {
             let bytes = wordcraft_docx::write(&doc).expect("embedded recipient choices must remain saveable");
             let output = unzip(&bytes);
             assert_eq!(output["word/recipientData.xml"], input["word/recipientData.xml"], "recipient flags and keys must be byte-identical");
-            let types = String::from_utf8(output["[Content_Types].xml"].clone()).unwrap();
-            assert!(types.contains(ct));
+            assert!(
+                elements(&output["[Content_Types].xml"], b"Override")
+                    .iter()
+                    .any(|o| o["PartName"] == "/word/recipientData.xml" && o["ContentType"] == ct),
+                "the emitted recipient part must retain its own content type"
+            );
             let settings = String::from_utf8(output["word/settings.xml"].clone()).unwrap();
             assert!(settings.contains("w:recipientData") && settings.contains("SELECT Name FROM Letters"));
             let refs = elements(&output["word/settings.xml"], b"w:recipientData");

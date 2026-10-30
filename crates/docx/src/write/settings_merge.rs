@@ -258,6 +258,14 @@ fn merge_compat(orig: &str, generated: &str) -> Option<String> {
 pub fn has_unowned(original: &[u8]) -> bool {
     let Some(xml) = std::str::from_utf8(original).ok() else { return false };
     let Some((_, _, kids)) = children(xml, "w:settings") else { return false };
+    if kids.iter().any(|child| child.name == "w:mailMerge") {
+        let Some(parsed) = crate::xml::parse(original).ok() else { return false };
+        if kids.len() == parsed.els().count()
+            && kids.iter().zip(parsed.els()).any(|(child, element)| child.name == "w:mailMerge" && element.name != "w:mailMerge")
+        {
+            return true;
+        }
+    }
     kids.iter().any(|k| match k.name.as_str() {
         "w:zoom" => false,
         // Anything in `w:compat` beyond its own tag and the compatibility mode.
@@ -278,13 +286,13 @@ pub fn merge(original: &[u8], generated: &[u8]) -> Option<Vec<u8>> {
     // Mail merge is regenerated from the namespace-aware tree. Recognise the same children
     // here, including local/default aliases, so an unreferenced original is not kept beside it.
     // Keep every other child's existing byte-preserving merge policy.
-    if g_kids.iter().any(|child| child.name == "w:mailMerge") {
+    if g_kids.iter().chain(&o_kids).any(|child| child.name == "w:mailMerge") {
         let parsed = crate::xml::parse(original).ok()?;
         if parsed.els().count() != o_kids.len() {
             return None;
         }
         for (child, element) in o_kids.iter_mut().zip(parsed.els()) {
-            if element.name == "w:mailMerge" {
+            if element.name == "w:mailMerge" || child.name == "w:mailMerge" {
                 child.name.clone_from(&element.name);
             }
         }
