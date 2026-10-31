@@ -141,7 +141,7 @@ pub(super) fn write(doc: &Document, out: &mut PartRels, embeds: &mut super::embe
     Ok(Some(merge.to_xml()))
 }
 
-/// Match source relationship types to the settings vocabulary actually emitted after merging.
+/// Match canonical mail-merge relationship types to the settings vocabulary actually emitted.
 pub(super) fn source_relationships(settings: &[u8], rels: PartRels) -> Result<PartRels, DocxError> {
     const TRANSITIONAL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     const STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
@@ -165,7 +165,10 @@ pub(super) fn source_relationships(settings: &[u8], rels: PartRels) -> Result<Pa
     let mut out = PartRels::default();
     for (id, kind, target, external) in rels.list {
         let kind = match kind.rsplit_once('/') {
-            Some((prefix, suffix)) if [TRANSITIONAL, STRICT].contains(&prefix) && matches!(suffix, "mailMergeSource" | "mailMergeHeaderSource") => {
+            Some((prefix, suffix))
+                if [TRANSITIONAL, STRICT].contains(&prefix)
+                    && matches!(suffix, "mailMergeSource" | "mailMergeHeaderSource" | "mailMergeRecipientData") =>
+            {
                 format!("{namespace}/{suffix}")
             }
             _ => kind,

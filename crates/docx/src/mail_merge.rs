@@ -6,11 +6,13 @@ use crate::package::MAX_EMBEDDED_XML;
 use crate::xml;
 
 pub(crate) fn recipient_kind(kind: &str) -> bool {
-    // MS-OI29500 §2.1.378 documents Word's spelling alongside the ISO spelling.
+    // ECMA-376 §17.14.28 and its Transitional form, plus both legacy spellings.
     matches!(
         kind,
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/recipientData"
             | "http://schemas.openxmlformats.org/officeDocument/2006/mailMergeRecipientData"
+            | "http://schemas.openxmlformats.org/officeDocument/2006/relationships/mailMergeRecipientData"
+            | "http://purl.oclc.org/ooxml/officeDocument/relationships/mailMergeRecipientData"
     )
 }
 

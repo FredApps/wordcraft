@@ -8,6 +8,8 @@ const WNE: &str = "http://schemas.microsoft.com/office/word/2006/wordml";
 const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const WORD: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/recipientData";
 const ISO: &str = "http://schemas.openxmlformats.org/officeDocument/2006/mailMergeRecipientData";
+const CANONICAL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/mailMergeRecipientData";
+const STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships/mailMergeRecipientData";
 const CT: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.mailMergeRecipientData+xml";
 const MS_CT: &str = "application/vnd.ms-word.mailMergeRecipientData+xml";
 
@@ -118,6 +120,55 @@ fn embedded_recipient_choices_survive_edit_two_saves_and_native_json() {
             doc = wordcraft_docx::read(&bytes).unwrap();
             assert!(doc.plain_text(wordcraft_doc::StoryRef::Body).contains("Edited letter."));
             assert!(String::from_utf8(output["word/document.xml"].clone()).unwrap().contains("MERGEFIELD Name"));
+        }
+    }
+}
+
+#[test]
+fn recipient_relationships_follow_emitted_settings_through_aliases_and_native_reopen() {
+    const SW: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";
+    const SR: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+    for kind in [CANONICAL, STRICT, WORD, ISO] {
+        for strict in [false, true] {
+            for alias in [false, true] {
+                let mut input = fixture("urn:original:recipient", CT, W);
+                for (name, bytes) in &mut input {
+                    let mut text = String::from_utf8(bytes.clone()).unwrap();
+                    if strict {
+                        text = text.replace(W, SW).replace(R, SR);
+                    }
+                    if name == "word/settings.xml" && alias {
+                        text = text.replace("w:", "x:").replace("xmlns:w=", "xmlns:x=").replace("r:", "rel:").replace("xmlns:r=", "xmlns:rel=");
+                    }
+                    *bytes = text.replace("urn:original:recipient", kind).into_bytes();
+                }
+                let mut doc = wordcraft_docx::read(&zip(&input)).unwrap();
+                doc.body.push(wordcraft_doc::Block::Para(wordcraft_doc::Paragraph::with_text("Edited letter.", Default::default())).into());
+                for _ in 0..2 {
+                    doc = serde_json::from_slice(&serde_json::to_vec(&doc).unwrap()).unwrap();
+                    let output = unzip(&wordcraft_docx::write(&doc).unwrap());
+                    assert_eq!(output["word/recipientData.xml"], input["word/recipientData.xml"]);
+                    let settings = std::str::from_utf8(&output["word/settings.xml"]).unwrap();
+                    let settings = roxmltree::Document::parse(settings).unwrap();
+                    let (wn, rn) = if strict && !alias { (SW, SR) } else { (W, R) };
+                    assert!(settings.root_element().has_tag_name((wn, "settings")));
+                    let reference = settings.descendants().find(|n| n.has_tag_name((wn, "recipientData"))).unwrap();
+                    let id = reference.attribute((rn, "id")).unwrap();
+                    let rels = elements(&output["word/_rels/settings.xml.rels"], b"Relationship");
+                    let recipient = rels.iter().find(|r| r["Id"] == id).unwrap();
+                    let expected = if [CANONICAL, STRICT].contains(&kind) { format!("{rn}/mailMergeRecipientData") } else { kind.into() };
+                    assert_eq!(recipient["Type"], expected, "input={kind}, strict={strict}, alias={alias}");
+                    assert_ne!(recipient.get("TargetMode").map(String::as_str), Some("External"));
+                    assert_eq!(recipient["Target"], "recipientData.xml");
+                    assert!(
+                        elements(&output["[Content_Types].xml"], b"Override")
+                            .iter()
+                            .any(|o| o["PartName"] == "/word/recipientData.xml" && o["ContentType"] == CT)
+                    );
+                    doc = wordcraft_docx::read(&zip(&output)).unwrap();
+                    assert!(doc.plain_text(wordcraft_doc::StoryRef::Body).contains("Edited letter."));
+                }
+            }
         }
     }
 }
