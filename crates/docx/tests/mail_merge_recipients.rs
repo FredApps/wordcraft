@@ -167,6 +167,53 @@ fn structurally_malformed_recipient_xml_refuses_docx_and_native_saves() {
 }
 
 #[test]
+fn recipient_namespaces_and_encoding_are_validated_before_opaque_copying() {
+    for (kind, ct, ns) in [(WORD, CT, W), (WORD, MS_CT, WNE), (ISO, CT, W)] {
+        let original = fixture(kind, ct, ns);
+        let valid = String::from_utf8(original["word/recipientData.xml"].clone()).unwrap();
+        let mut odd_utf16 = vec![0xFF, 0xFE];
+        odd_utf16.extend(valid.encode_utf16().flat_map(u16::to_le_bytes));
+        odd_utf16.push(b'x');
+        let malformed = [
+            format!("{valid}<!DOCTYPE recipients>").into_bytes(),
+            valid.replace("</v:recipients>", "<!DOCTYPE recipients></v:recipients>").into_bytes(),
+            valid.replace("</v:recipients>", "<missing:choice/></v:recipients>").into_bytes(),
+            valid.replacen("v:val=\"0\"", "v:val=\"0\" missing:choice=\"1\"", 1).into_bytes(),
+            valid.replacen("v:val=\"0\"", &format!("v:val=\"0\" xmlns:z=\"{ns}\" z:val=\"1\""), 1).into_bytes(),
+            [valid.strip_suffix("</v:recipients>").unwrap().as_bytes(), b"<![CDATA[\xff]]></v:recipients>"].concat(),
+            [valid.as_bytes(), b"<!-- \xff -->"].concat(),
+            odd_utf16,
+        ];
+        for (i, payload) in malformed.into_iter().enumerate() {
+            let mut input = original.clone();
+            input.insert("word/recipientData.xml".into(), payload.clone());
+            let imported = wordcraft_docx::read(&zip(&input)).unwrap();
+            assert!(wordcraft_docx::write(&imported).unwrap_err().to_string().contains("mail merge"), "case {i}");
+            let mut native = wordcraft_docx::read(&zip(&original)).unwrap();
+            native.passthrough.insert("word/recipientData.xml".into(), Arc::new(payload));
+            native = serde_json::from_slice(&serde_json::to_vec(&native).unwrap()).unwrap();
+            assert!(wordcraft_docx::write(&native).unwrap_err().to_string().contains("mail merge"), "native case {i}");
+        }
+        // Valid namespace aliases, CDATA, Unicode and UTF-16 retain their original bytes.
+        let decorated = valid.replace("</v:recipients>", "<![CDATA[Choice α]]></v:recipients>");
+        for payload in [
+            [b"\xef\xbb\xbf".as_slice(), decorated.as_bytes()].concat(),
+            [vec![0xFF, 0xFE], decorated.encode_utf16().flat_map(u16::to_le_bytes).collect()].concat(),
+            [vec![0xFE, 0xFF], decorated.encode_utf16().flat_map(u16::to_be_bytes).collect()].concat(),
+        ] {
+            let mut input = original.clone();
+            input.insert("word/recipientData.xml".into(), payload.clone());
+            let mut doc = wordcraft_docx::read(&zip(&input)).unwrap();
+            for _ in 0..2 {
+                let saved = wordcraft_docx::write(&doc).unwrap();
+                assert_eq!(unzip(&saved)["word/recipientData.xml"], payload);
+                doc = serde_json::from_slice(&serde_json::to_vec(&wordcraft_docx::read(&saved).unwrap()).unwrap()).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
 fn unsupported_recipient_inputs_refuse_instead_of_dropping_choices() {
     let original = fixture(WORD, CT, W);
     let relpart = "word/_rels/settings.xml.rels";
@@ -325,6 +372,49 @@ fn recipient_case_collisions_refuse_only_when_both_spellings_are_referenced() {
                     doc = wordcraft_docx::read(&saved).unwrap();
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn recipient_structural_budgets_cover_attributes_namespaces_and_nesting() {
+    let original = fixture(WORD, CT, W);
+    for (count, namespaces, nested) in [(1023, false, false), (1024, false, false), (1024, true, false), (90_000, false, false), (1024, false, true)]
+    {
+        let attrs =
+            (0..count).map(|i| if namespaces { format!(" xmlns:n{i}=\"urn:original:{i}\"") } else { format!(" a{i}=\"\"") }).collect::<String>();
+        let payload = if nested {
+            format!("<v:recipients xmlns:v=\"{W}\"><v:choice{attrs}></v:choice></v:recipients>")
+        } else {
+            format!("<v:recipients xmlns:v=\"{W}\"{attrs}/>")
+        }
+        .into_bytes();
+        assert!(payload.len() < 1024 * 1024);
+        let mut input = original.clone();
+        input.insert("word/recipientData.xml".into(), payload.clone());
+        let imported = wordcraft_docx::read(&zip(&input)).unwrap();
+        let mut native = wordcraft_docx::read(&zip(&original)).unwrap();
+        native.passthrough.insert("word/recipientData.xml".into(), Arc::new(payload.clone()));
+        for doc in [imported, serde_json::from_slice(&serde_json::to_vec(&native).unwrap()).unwrap()] {
+            if count == 1023 || nested {
+                let output = unzip(&wordcraft_docx::write(&doc).unwrap());
+                assert_eq!(output["word/recipientData.xml"], payload);
+            } else {
+                assert!(wordcraft_docx::write(&doc).unwrap_err().to_string().contains("mail merge"));
+            }
+        }
+    }
+    for depth in [256, 257] {
+        let payload =
+            format!("<v:recipients xmlns:v=\"{W}\">{}{}{}", "<v:choice>".repeat(depth - 1), "</v:choice>".repeat(depth - 1), "</v:recipients>")
+                .into_bytes();
+        let mut input = original.clone();
+        input.insert("word/recipientData.xml".into(), payload.clone());
+        let doc = wordcraft_docx::read(&zip(&input)).unwrap();
+        if depth == 256 {
+            assert_eq!(unzip(&wordcraft_docx::write(&doc).unwrap())["word/recipientData.xml"], payload);
+        } else {
+            assert!(wordcraft_docx::write(&doc).unwrap_err().to_string().contains("mail merge"));
         }
     }
 }

@@ -1,4 +1,6 @@
 //! The single opaque inclusion/exclusion part of a mail-merge template.
+use std::borrow::Cow;
+
 use crate::DocxError;
 use crate::package::MAX_EMBEDDED_XML;
 use crate::xml;
@@ -43,15 +45,78 @@ pub(crate) fn validate_recipient(bytes: &[u8], content_type: &str) -> Result<(),
     if bytes.len() > MAX_EMBEDDED_XML {
         return Err(DocxError::MailMerge("recipient data exceeds 1 MiB".into()));
     }
-    let root = xml::parse_ns_strict(bytes, &[("wne", "http://schemas.microsoft.com/office/word/2006/wordml")])
-        .map_err(|e| DocxError::MailMerge(format!("invalid recipient data: {e}")))?;
+    // Import parsing repairs some malformed XML. A retained leaf instead needs validation of
+    // the complete bytes we will copy, including namespaces, encoding and document grammar.
+    let text = recipient_text(bytes)?;
+    check_recipient_limits(&text)?;
+    let parsed =
+        roxmltree::Document::parse_with_options(&text, roxmltree::ParsingOptions { nodes_limit: MAX_EMBEDDED_XML as u32, ..Default::default() })
+            .map_err(|e| DocxError::MailMerge(format!("invalid recipient data: {e}")))?;
+    let root = parsed.root_element().tag_name();
     let valid = match content_type {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.mailMergeRecipientData+xml" => root.name == "w:recipients",
-        "application/vnd.ms-word.mailMergeRecipientData+xml" => root.name == "wne:recipients",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.mailMergeRecipientData+xml" => {
+            root.name() == "recipients"
+                && matches!(
+                    root.namespace(),
+                    Some("http://schemas.openxmlformats.org/wordprocessingml/2006/main" | "http://purl.oclc.org/ooxml/wordprocessingml/main")
+                )
+        }
+        "application/vnd.ms-word.mailMergeRecipientData+xml" => {
+            root.name() == "recipients" && root.namespace() == Some("http://schemas.microsoft.com/office/word/2006/wordml")
+        }
         _ => false,
     };
     if !valid {
         return Err(DocxError::MailMerge("unsupported recipient data content type or root".into()));
     }
     Ok(())
+}
+
+/// Bound work before the validating parser compares attributes or builds a tree.
+fn check_recipient_limits(text: &str) -> Result<(), DocxError> {
+    use quick_xml::events::Event;
+
+    // A plain reader avoids namespace resolution and duplicate-attribute comparisons here.
+    // The subsequent parser validates the complete XML and namespace grammar.
+    let mut reader = quick_xml::Reader::from_str(text);
+    let mut depth = 0usize;
+    loop {
+        let event = reader.read_event().map_err(|e| DocxError::MailMerge(format!("invalid recipient data: {e}")))?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element) => {
+                if depth >= xml::MAX_DEPTH || element.attributes().with_checks(false).take(xml::MAX_ATTRS + 1).count() > xml::MAX_ATTRS {
+                    return Err(DocxError::MailMerge("recipient XML exceeds structural limits".into()));
+                }
+                if matches!(event, Event::Start(_)) {
+                    depth += 1;
+                }
+            }
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Eof => return Ok(()),
+            _ => {}
+        }
+    }
+}
+
+/// Decode only supported Unicode input, without repairing bytes that will later be copied.
+fn recipient_text(bytes: &[u8]) -> Result<Cow<'_, str>, DocxError> {
+    let little_endian = match bytes.get(..2) {
+        Some([0xFF, 0xFE]) => Some(true),
+        Some([0xFE, 0xFF]) => Some(false),
+        _ => None,
+    };
+    if let Some(le) = little_endian {
+        let rest = bytes.get(2..).unwrap_or_default();
+        let (pairs, remainder) = rest.as_chunks::<2>();
+        if !remainder.is_empty() {
+            return Err(DocxError::MailMerge("incomplete UTF-16 recipient data".into()));
+        }
+        let units = pairs.iter().map(|pair| if le { u16::from_le_bytes(*pair) } else { u16::from_be_bytes(*pair) });
+        let text = char::decode_utf16(units)
+            .collect::<Result<String, _>>()
+            .map_err(|e| DocxError::MailMerge(format!("invalid UTF-16 recipient data: {e}")))?;
+        Ok(Cow::Owned(text))
+    } else {
+        std::str::from_utf8(bytes).map(Cow::Borrowed).map_err(|e| DocxError::MailMerge(format!("invalid UTF-8 recipient data: {e}")))
+    }
 }
