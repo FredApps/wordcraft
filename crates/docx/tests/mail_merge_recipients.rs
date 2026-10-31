@@ -174,6 +174,42 @@ fn recipient_relationships_follow_emitted_settings_through_aliases_and_native_re
 }
 
 #[test]
+fn native_recipient_modes_match_import_acceptance() {
+    for kind in [WORD, ISO, CANONICAL, STRICT] {
+        let original = fixture(kind, CT, W);
+        let native = wordcraft_docx::read(&zip(&original)).unwrap();
+        let key = "wordcraft:settings.mailMerge.rels";
+        let rels = std::str::from_utf8(&native.passthrough[key]).unwrap();
+        for (mode, allowed) in [
+            (None, true),
+            (Some("Internal"), true),
+            (Some("iNtErNaL"), true),
+            (Some("Unknown"), false),
+            (Some(""), false),
+            (Some(" Internal"), false),
+            (Some("Internal "), false),
+            (Some("External"), false),
+            (Some("EXTERNAL"), false),
+            (Some("External "), false),
+        ] {
+            let mut doc = native.clone();
+            let changed = mode.map_or_else(|| rels.to_owned(), |m| rels.replacen("Id=\"rId1\"", &format!("Id=\"rId1\" TargetMode=\"{m}\""), 1));
+            doc.passthrough.insert(key.into(), Arc::new(changed.into_bytes()));
+            doc = serde_json::from_slice(&serde_json::to_vec(&doc).unwrap()).unwrap();
+            let result = wordcraft_docx::write(&doc);
+            if allowed {
+                let saved = result.unwrap();
+                assert_eq!(unzip(&saved)["word/recipientData.xml"], original["word/recipientData.xml"]);
+                let reopened = wordcraft_docx::read(&saved).unwrap();
+                assert!(wordcraft_docx::write(&reopened).is_ok());
+            } else {
+                assert!(result.unwrap_err().to_string().contains("mail merge"), "{kind}: {mode:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn structurally_malformed_recipient_xml_refuses_docx_and_native_saves() {
     for (kind, ct, ns) in [(WORD, CT, W), (WORD, MS_CT, WNE), (ISO, CT, W)] {
         let original = fixture(kind, ct, ns);

@@ -107,12 +107,13 @@ pub(super) fn write(doc: &Document, out: &mut PartRels, embeds: &mut super::embe
             let kind = rel.attr("Type").unwrap_or("");
             let target = rel.attr("Target").unwrap_or("");
             let external = rel.attr("TargetMode").is_some_and(|v| v.eq_ignore_ascii_case("External"));
+            let internal = rel.attr("TargetMode").is_none_or(|v| v.eq_ignore_ascii_case("Internal"));
             let source = ["mailMergeSource", "mailMergeHeaderSource"].iter().any(|suffix| {
                 source_type.is_none_or(|expected| expected == *suffix)
                     && (kind == format!("http://schemas.openxmlformats.org/officeDocument/2006/relationships/{suffix}")
                         || kind == format!("http://purl.oclc.org/ooxml/officeDocument/relationships/{suffix}"))
             });
-            if target.trim().is_empty() || if recipient { external || !crate::mail_merge::recipient_kind(kind) } else { !external || !source } {
+            if target.trim().is_empty() || if recipient { !internal || !crate::mail_merge::recipient_kind(kind) } else { !external || !source } {
                 return Err(DocxError::MailMerge(format!(
                     "unsupported or empty source relationship {id}; expected an external source or internal recipient data"
                 )));
