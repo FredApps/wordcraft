@@ -48,7 +48,7 @@ pub(crate) fn validate_recipient(bytes: &[u8], content_type: &str) -> Result<(),
     // Import parsing repairs some malformed XML. A retained leaf instead needs validation of
     // the complete bytes we will copy, including namespaces, encoding and document grammar.
     let text = recipient_text(bytes)?;
-    check_recipient_limits(&text)?;
+    check_recipient_limits(&text, bytes)?;
     let parsed =
         roxmltree::Document::parse_with_options(&text, roxmltree::ParsingOptions { nodes_limit: MAX_EMBEDDED_XML as u32, ..Default::default() })
             .map_err(|e| DocxError::MailMerge(format!("invalid recipient data: {e}")))?;
@@ -73,7 +73,7 @@ pub(crate) fn validate_recipient(bytes: &[u8], content_type: &str) -> Result<(),
 }
 
 /// Bound work before the validating parser compares attributes or builds a tree.
-fn check_recipient_limits(text: &str) -> Result<(), DocxError> {
+fn check_recipient_limits(text: &str, bytes: &[u8]) -> Result<(), DocxError> {
     use quick_xml::events::Event;
 
     // A plain reader avoids namespace resolution and duplicate-attribute comparisons here.
@@ -89,6 +89,21 @@ fn check_recipient_limits(text: &str) -> Result<(), DocxError> {
                 }
                 if matches!(event, Event::Start(_)) {
                     depth += 1;
+                }
+            }
+            Event::Decl(declaration) => {
+                if let Some(encoding) =
+                    declaration.encoding().transpose().map_err(|e| DocxError::MailMerge(format!("invalid recipient data: {e}")))?
+                {
+                    // The string parser ignores declarations. Check the original byte encoding
+                    // as required by XML 1.0 section 4.3.3 before copying those bytes unchanged.
+                    let matches = match bytes.get(..2) {
+                        Some([0xFF, 0xFE] | [0xFE, 0xFF]) => encoding.eq_ignore_ascii_case(b"UTF-16"),
+                        _ => encoding.eq_ignore_ascii_case(b"UTF-8"),
+                    };
+                    if !matches {
+                        return Err(DocxError::MailMerge("unsupported or mismatched recipient XML encoding".into()));
+                    }
                 }
             }
             Event::End(_) => depth = depth.saturating_sub(1),

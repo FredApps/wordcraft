@@ -418,3 +418,54 @@ fn recipient_structural_budgets_cover_attributes_namespaces_and_nesting() {
         }
     }
 }
+
+#[test]
+fn recipient_encoding_declarations_match_original_docx_and_native_bytes() {
+    for (kind, ct, ns) in [(WORD, CT, W), (WORD, MS_CT, WNE), (ISO, CT, W)] {
+        let original = fixture(kind, ct, ns);
+        for (wire, declared, accepted) in [
+            ("utf8", "UTF-8", true),
+            ("utf8", "utf-8", true),
+            ("utf8-bom", "Utf-8", true),
+            ("utf16-le", "UTF-16", true),
+            ("utf16-be", "UTF-16", true),
+            ("utf16-le", "UTF-16LE", false),
+            ("utf16-be", "UTF-16BE", false),
+            ("utf16-le", "utf-16", true),
+            ("utf16-be", "utf-16", true),
+            ("utf8", "UTF-16", false),
+            ("utf8-bom", "UTF-16", false),
+            ("utf16-le", "UTF-8", false),
+            ("utf16-be", "UTF-8", false),
+            ("utf16-le", "UTF-16BE", false),
+            ("utf16-be", "UTF-16LE", false),
+            ("utf8", "ISO-8859-1", false),
+            ("utf8", "x-original", false),
+        ] {
+            let text = format!("<?xml version='1.0' encoding='{declared}'?><v:recipients xmlns:v='{ns}'/>");
+            let payload = match wire {
+                "utf16-le" => [vec![0xFF, 0xFE], text.encode_utf16().flat_map(u16::to_le_bytes).collect()].concat(),
+                "utf16-be" => [vec![0xFE, 0xFF], text.encode_utf16().flat_map(u16::to_be_bytes).collect()].concat(),
+                "utf8-bom" => [b"\xef\xbb\xbf".as_slice(), text.as_bytes()].concat(),
+                _ => text.into_bytes(),
+            };
+            let mut input = original.clone();
+            input.insert("word/recipientData.xml".into(), payload.clone());
+            let imported = wordcraft_docx::read(&zip(&input)).unwrap();
+            let mut native = wordcraft_docx::read(&zip(&original)).unwrap();
+            native.passthrough.insert("word/recipientData.xml".into(), Arc::new(payload.clone()));
+            for mut doc in [imported, serde_json::from_slice(&serde_json::to_vec(&native).unwrap()).unwrap()] {
+                for _ in 0..2 {
+                    if accepted {
+                        let saved = wordcraft_docx::write(&doc).unwrap();
+                        assert_eq!(unzip(&saved)["word/recipientData.xml"], payload);
+                        doc = serde_json::from_slice(&serde_json::to_vec(&wordcraft_docx::read(&saved).unwrap()).unwrap()).unwrap();
+                    } else {
+                        assert!(wordcraft_docx::write(&doc).unwrap_err().to_string().contains("mail merge"), "{wire}/{declared}");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
