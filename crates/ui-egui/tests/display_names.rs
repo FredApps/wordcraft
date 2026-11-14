@@ -94,6 +94,8 @@ fn literals(source: &str) -> Vec<String> {
             if !test_module {
                 out.push(text);
             }
+        } else if chars[at] == '\'' && chars.get(at + 1) == Some(&'\\') && chars.get(at + 3) == Some(&'\'') {
+            at += 4; // An escaped character literal must not start a string.
         } else if chars[at] == '\'' && chars.get(at + 2) == Some(&'\'') {
             at += 3; // A character literal such as '"', not the start of a string.
         } else {
@@ -180,4 +182,12 @@ fn guard_scans_production_after_test_only_items_and_parses_raw_labels() {
     assert_eq!(literals(source), ["WordArt"]);
     assert!(literals(source).iter().any(|label| banned_display(label)));
     assert_eq!(literals("#[cfg(test)] mod tests; fn live() { let _ = \"SmartArt\"; }"), ["SmartArt"]);
+}
+
+#[test]
+fn guard_skips_escaped_character_literals_without_hiding_labels() {
+    let source = r#"let quote = '\"'; let label = "WordArt"; // "ignored""#;
+    assert_eq!(literals(source), ["WordArt"]);
+    assert!(literals(source).iter().any(|label| banned_display(label)));
+    assert_eq!(literals(r#"let quote = '\"'; // "WordArt""#), Vec::<String>::new());
 }
